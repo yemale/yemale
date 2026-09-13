@@ -3,38 +3,41 @@
 from __future__ import annotations
 
 import numpy as np
-from numba import njit
+from numba import njit, prange
 
 
 @njit(cache=True, boundscheck=False)
-def _lapjv(cost):
-    n = cost.shape[0]
-    free_row_idx = n - 1
-    u = np.zeros(n, dtype=np.float64)
-    v = np.empty(n, dtype=np.float64)
-    r2c = np.full(n, -1, dtype=np.int64)
-    c2r = np.full(n, -1, dtype=np.int64)
+def _lapjv(cost, row_bias=None):
+    n = cost.shape[0] - 1
+    free_row_idx = n
+    u = np.zeros(n + 1, dtype=np.float64)
+    v = np.empty(n + 1, dtype=np.float64)
+    r2c = np.full(n + 1, -1, dtype=np.int64)
+    c2r = np.full(n + 1, -1, dtype=np.int64)
 
-    for j in range(n):
+    for j in range(n + 1):
         best_val = np.inf
         best_i = -1
-        for i in range(n):
+        for i in range(n + 1):
             if i == free_row_idx:
                 continue
-            if cost[i, j] < best_val:
-                best_val = cost[i, j]
+            value = cost[i, j]
+            if row_bias is not None:
+                value += row_bias[i]
+            if value < best_val:
+                best_val = value
                 best_i = i
         v[j] = best_val
         if r2c[best_i] == -1:
             r2c[best_i] = j
             c2r[j] = best_i
 
-    for i in range(n):
+    for i in range(n + 1):
         if r2c[i] == -1:
             continue
         j1 = r2c[i]
         best = np.inf
-        for j in range(n):
+        for j in range(n + 1):
             if j != j1:
                 rc = cost[i, j] - v[j]
                 if rc < best:
@@ -42,16 +45,16 @@ def _lapjv(cost):
         u[i] = best
         v[j1] = cost[i, j1] - best
 
-    dist = np.empty(n, dtype=np.float64)
-    pred = np.empty(n, dtype=np.int64)
-    scanned = np.empty(n, dtype=np.bool_)
+    dist = np.empty(n + 1, dtype=np.float64)
+    pred = np.empty(n + 1, dtype=np.int64)
+    scanned = np.empty(n + 1, dtype=np.bool_)
 
-    for free_i in range(n):
+    for free_i in range(n + 1):
         if r2c[free_i] != -1:
             continue
         u_fi = u[free_i]
         frow = cost[free_i]
-        for j in range(n):
+        for j in range(n + 1):
             dist[j] = frow[j] - u_fi - v[j]
             pred[j] = free_i
             scanned[j] = False
@@ -61,7 +64,7 @@ def _lapjv(cost):
         while True:
             min_d = np.inf
             j_star = -1
-            for j in range(n):
+            for j in range(n + 1):
                 if not scanned[j] and dist[j] < min_d:
                     min_d = dist[j]
                     j_star = j
@@ -73,7 +76,7 @@ def _lapjv(cost):
             i_m = c2r[j_star]
             u_im = u[i_m]
             crow = cost[i_m]
-            for j in range(n):
+            for j in range(n + 1):
                 if not scanned[j]:
                     nd = min_d + crow[j] - u_im - v[j]
                     if nd < dist[j]:
@@ -81,7 +84,7 @@ def _lapjv(cost):
                         pred[j] = i_m
 
         u[free_i] += h
-        for j in range(n):
+        for j in range(n + 1):
             if scanned[j] and j != sink:
                 delta = dist[j] - h
                 v[j] += delta
@@ -100,28 +103,28 @@ def _lapjv(cost):
                 break
 
     total = 0.0
-    for i in range(n):
+    for i in range(n + 1):
         total += cost[i, r2c[i]]
     return total, r2c[free_row_idx], c2r, u, v
 
 
 @njit(cache=True, boundscheck=False)
 def _loo_costs(cost, c2r, u, v, free_target, base):
-    n = cost.shape[0]
-    dist = np.full(n, np.inf, dtype=np.float64)
-    done = np.zeros(n, dtype=np.bool_)
-    pred = np.full(n, -1, dtype=np.int64)
+    n = cost.shape[0] - 1
+    dist = np.full(n + 1, np.inf, dtype=np.float64)
+    done = np.zeros(n + 1, dtype=np.bool_)
+    pred = np.full(n + 1, -1, dtype=np.int64)
     dist[free_target] = 0.0
 
-    for _ in range(n):
+    for _ in range(n + 1):
         best = np.inf
         current = -1
-        for j in range(n):
+        for j in range(n + 1):
             if not done[j] and dist[j] < best:
                 best = dist[j]
                 current = j
         done[current] = True
-        for target in range(n):
+        for target in range(n + 1):
             if done[target]:
                 continue
             source = c2r[target]
@@ -133,8 +136,8 @@ def _loo_costs(cost, c2r, u, v, free_target, base):
                 dist[target] = candidate
                 pred[target] = current
 
-    leave_one = np.empty(n, dtype=np.float64)
-    for target in range(n):
+    leave_one = np.empty(n + 1, dtype=np.float64)
+    for target in range(n + 1):
         leave_one[target] = base + dist[target] + v[free_target] - v[target]
     return leave_one, pred
 
@@ -151,39 +154,65 @@ def assign(base, predecessor, free_target, reserved):
     return result
 
 
+@njit(cache=True, boundscheck=False)
+def _assignments(base, predecessor, free_target, labels, result):
+    for row in range(len(labels)):
+        inverse = assign(base, predecessor, free_target, labels[row])
+        for target in range(len(base)):
+            result[row, inverse[target]] = target
+
+
+@njit(cache=True, boundscheck=False, parallel=True)
+def _assignments_parallel(base, predecessor, free_target, labels, result):
+    for row in prange(len(labels)):
+        inverse = assign(base, predecessor, free_target, labels[row])
+        for target in range(len(base)):
+            result[row, inverse[target]] = target
+
+
+def assignments(base, predecessor, free_target, labels):
+    result = np.empty((len(labels), len(base)), dtype=np.int64)
+    parallel = len(labels) >= 512 and result.size >= 65536
+    kernel = _assignments_parallel if parallel else _assignments
+    kernel(base, predecessor, free_target, labels, result)
+    return result
+
+
 def solve_1d(source: np.ndarray, target: np.ndarray):
-    """Solve the same leave-one problem by monotone sorting."""
+    """Solve leave-one costs -source * target by monotone sorting."""
     source_order = np.argsort(source, kind="stable")
     target_order = np.argsort(target, kind="stable")
     x = source[source_order]
     u = target[target_order]
-    N = len(u)
+    n = len(source)
 
-    left = (x - u[:-1]) ** 2
-    right = (x - u[1:]) ** 2
+    left = -x * u[:-1]
+    right = -x * u[1:]
     prefix = np.concatenate(([0.0], np.cumsum(left)))
     suffix = np.concatenate((np.cumsum(right[::-1])[::-1], [0.0]))
     sorted_cost = prefix + suffix
 
-    leave_one = np.empty(N)
+    leave_one = np.empty(n + 1)
     leave_one[target_order] = sorted_cost
     free_position = int(np.flatnonzero(sorted_cost == sorted_cost.min())[-1])
     free_target = int(target_order[free_position])
 
-    inverse = np.empty(N, dtype=np.int64)
-    inverse[target_order] = np.insert(source_order, free_position, len(source))
+    inverse = np.empty(n + 1, dtype=np.int64)
+    inverse[target_order] = np.insert(source_order, free_position, n)
 
-    sorted_pred = np.full(N, -1, dtype=np.int64)
+    sorted_pred = np.full(n + 1, -1, dtype=np.int64)
     sorted_pred[:free_position] = target_order[1 : free_position + 1]
     sorted_pred[free_position + 1 :] = target_order[free_position:-1]
-    pred = np.empty(N, dtype=np.int64)
+    pred = np.empty(n + 1, dtype=np.int64)
     pred[target_order] = sorted_pred
     return leave_one, inverse, pred, free_target, (x, target_order)
 
 
-def solve(cost: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-    """Return leave-one costs and their assignment tree."""
-    total, free_column, column_to_row, u, v = _lapjv(cost)
+def solve(
+    cost: np.ndarray, row_bias: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Return leave-one costs and their tree; row_bias only seeds the matching."""
+    total, free_column, column_to_row, u, v = _lapjv(cost, row_bias)
     free_column = int(free_column)
     leave_one, pred = _loo_costs(cost, column_to_row, u, v, free_column, float(total))
     return leave_one, column_to_row, pred, free_column

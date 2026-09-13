@@ -1,5 +1,7 @@
 """Candidate-augmented optimal transport."""
 
-from .transport import fit
+from .law import Law, expect
+from .reference import Reference, reference
+from .transport import Transport, fit
 
-__all__ = ["fit"]
+__all__ = ["Law", "Reference", "Transport", "expect", "fit", "reference"]

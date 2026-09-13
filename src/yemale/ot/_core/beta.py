@@ -1,16 +1,18 @@
-"""Exact directional barycentres for spherical reference cells."""
+"""Spherical reference coordinates and their exact first moments."""
 
 import numpy as np
 from scipy.special import betainc, betaincinv, betaln
 
 
-def directional_barycentres(dimension: int, cell_count: int) -> np.ndarray:
+def directional_barycentres(
+    dimension: int, cell_count: int, *, bounds=None
+) -> np.ndarray:
     """Return ``E[Theta | A_l]`` for the equal-mass directional cells.
 
     Equal-volume quantile cells ``P_l`` in ``[0, 1]^(d - 1)`` are mapped by
     the recursive spherical construction to directional cells ``A_l``.
     """
-    u_bounds = _quantile_cells(dimension, cell_count)
+    u_bounds = _quantile_cells(dimension, cell_count) if bounds is None else bounds
     beta_bounds = _beta_quantile_bounds(dimension, u_bounds)
     barycentres = np.empty((cell_count, dimension))
     for coordinate in range(dimension):
@@ -132,3 +134,42 @@ def _beta_interval_moment(
     lower_probability = betainc(shifted_alpha, shifted_beta, lower)
     upper_probability = betainc(shifted_alpha, shifted_beta, upper)
     return normalizer * (upper_probability - lower_probability)
+
+
+def directions_from_coords(dimension, bounds, coordinates):
+    """Map independent uniform cell coordinates to spherical directions."""
+
+    def rec(remaining, level):
+        lower, upper = bounds[:, level].T
+        coordinate = lower + coordinates[:, level] * (upper - lower)
+        if remaining == 2:
+            angle = 2.0 * np.pi * coordinate
+            return np.column_stack([np.cos(angle), np.sin(angle)])
+        alpha, beta = _coordinate_beta_parameters(remaining)
+        head = 2.0 * betaincinv(alpha, beta, coordinate) - 1.0
+        scale = np.sqrt(np.maximum(1.0 - head * head, 0.0))
+        return np.column_stack([head, scale[:, None] * rec(remaining - 1, level + 1)])
+
+    return rec(dimension, 0)
+
+
+def direction_cdf(unit):
+    """Invert spherical directions to the recursive uniform coordinates."""
+    dimension = unit.shape[1]
+    coordinates = np.empty((len(unit), dimension - 1))
+    tail = unit
+    for level in range(dimension - 1):
+        remaining = dimension - level
+        if remaining == 2:
+            angle = np.arctan2(tail[:, 1], tail[:, 0]) % (2.0 * np.pi)
+            coordinates[:, level] = angle / (2.0 * np.pi)
+            break
+        head = np.clip(tail[:, 0], -1.0, 1.0)
+        alpha, beta = _coordinate_beta_parameters(remaining)
+        coordinates[:, level] = betainc(alpha, beta, (head + 1.0) / 2.0)
+        scale = np.sqrt(np.maximum(1.0 - head * head, 0.0))
+        next_tail = np.zeros((len(unit), remaining - 1))
+        moved = scale > 0.0
+        next_tail[moved] = tail[moved, 1:] / scale[moved, None]
+        tail = next_tail
+    return coordinates
