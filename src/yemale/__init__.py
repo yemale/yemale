@@ -1,6 +1,5 @@
-"""Candidate-augmented transport and explicit predictive laws."""
+"""Candidate-augmented transport and predictive distributions."""
 
 from . import ot
-from .ot import expect
 
-__all__ = ["expect", "ot"]
+__all__ = ["ot"]

@@ -1,4 +1,4 @@
-"""Analytical smoothing identities and inverse regressions."""
+"""Check smooth maps, their derivatives, and their inverses."""
 
 import numpy as np
 import pytest
@@ -12,7 +12,7 @@ def test_two_site_map_inverse_and_pullback_density_have_closed_forms():
     points = np.array([[-0.7], [0.0], [0.9], [15.0]])
     derivative = 0.625 / np.cosh(points[:, 0] / 0.8) ** 2
     np.testing.assert_allclose(smooth(points)[:, 0], 0.5 * np.tanh(points[:, 0] / 0.8))
-    # Zero absolute tolerance detects cancellation of small positive tail derivatives.
+    # Check relative error so a small, nonzero derivative cannot pass as zero.
     np.testing.assert_allclose(
         smooth.jacobian(points)[:, 0, 0], derivative, rtol=1e-12, atol=0
     )
@@ -65,7 +65,9 @@ def test_smooth_derivatives_and_inverse_use_original_source_coordinates():
     np.testing.assert_array_equal(paired_jacobian, smooth.jacobian(point))
     np.testing.assert_allclose(smooth.inverse(smooth(point)), point, rtol=0, atol=5e-8)
     np.testing.assert_allclose(
-        ot.expect(smooth.law(point), lambda u: u, size=512), smooth(point), atol=0.003
+        smooth.reference_distribution(point=point).mean(),
+        smooth(point=point),
+        atol=1e-14,
     )
 
 
@@ -84,7 +86,7 @@ def test_smooth_target_coordinates_preserve_potential_jacobian_and_inverse():
     target = np.array([[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]])
     points = np.array([[0.2, 0.4], [-0.1, 0.3]])
     smooth = ot.fit(source, target=target).smooth(0.4)
-    for scale, shift in ((1.0, 20.0), (1e15, 0.0)):
+    for scale, shift in ((1.0, 20.0), (1e-150, 0.0), (1e150, 0.0)):
         transformed = ot.fit(source, target=scale * target + shift).smooth(scale * 0.4)
         np.testing.assert_allclose(
             (transformed(points) - shift) / scale, smooth(points), atol=1e-12
@@ -98,10 +100,9 @@ def test_smooth_target_coordinates_preserve_potential_jacobian_and_inverse():
             smooth.potential(points),
             atol=1e-12,
         )
-        if scale == 1.0:
-            np.testing.assert_allclose(
-                transformed.inverse(transformed(points)), points, atol=1e-8
-            )
+        np.testing.assert_allclose(
+            transformed.inverse(transformed(points)), points, atol=1e-8
+        )
 
 
 def test_inverse_requires_full_rank_and_strict_hull_interior():

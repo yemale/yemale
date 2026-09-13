@@ -1,19 +1,20 @@
-"""Spherical reference coordinates and their exact first moments."""
+"""Construct cells on the sphere and compute their directional moments."""
 
 import numpy as np
 from scipy.special import betainc, betaincinv, betaln
 
 
 def directional_barycentres(
-    dimension: int, cell_count: int, *, bounds=None
+    dimension: int, cell_count: int, *, bounds=None, beta_bounds=None
 ) -> np.ndarray:
-    """Return ``E[Theta | A_l]`` for the equal-mass directional cells.
+    """Return the mean direction within each cell on the sphere.
 
-    Equal-volume quantile cells ``P_l`` in ``[0, 1]^(d - 1)`` are mapped by
-    the recursive spherical construction to directional cells ``A_l``.
+    Without ``bounds``, split the unit cube into equal-volume boxes, then
+    map them to cells on the sphere.
     """
     u_bounds = _quantile_cells(dimension, cell_count) if bounds is None else bounds
-    beta_bounds = _beta_quantile_bounds(dimension, u_bounds)
+    if beta_bounds is None:
+        beta_bounds = _beta_quantile_bounds(dimension, u_bounds)
     barycentres = np.empty((cell_count, dimension))
     for coordinate in range(dimension):
         mean = _directional_mean(dimension, u_bounds, beta_bounds, coordinate)
@@ -21,18 +22,41 @@ def directional_barycentres(
     return barycentres
 
 
+def angular_moments(
+    dimension: int, bounds: np.ndarray, order, *, beta_bounds=None
+) -> np.ndarray:
+    """Return the requested directional moment within each cell."""
+    value = np.ones(len(bounds))
+    if beta_bounds is None:
+        beta_bounds = _beta_quantile_bounds(dimension, bounds)
+    for level in range(dimension - 1):
+        remaining = dimension - level
+        if remaining == 2:
+            return value * _arc_moment(order[level], order[level + 1], bounds[:, level])
+        lower, upper = (2.0 * beta_bounds[:, level] - 1.0).T
+        mass = bounds[:, level, 1] - bounds[:, level, 0]
+        value *= _head_moment(
+            remaining,
+            order[level],
+            sum(order[level + 1 :]),
+            lower,
+            upper,
+            mass,
+        )
+    return value
+
+
 def _quantile_cells(dimension: int, cell_count: int) -> np.ndarray:
-    """Return bounds for equal-volume ``P_l`` in quantile coordinates."""
+    """Return lower and upper bounds of equal-volume boxes in the unit cube."""
     cells = np.empty((cell_count, dimension - 1, 2))
     _fill_quantile_cells(dimension, cell_count, cells, 0, 0)
     return cells
 
 
 def _beta_quantile_bounds(dimension: int, u_bounds: np.ndarray) -> np.ndarray:
-    """Return rescaled-Beta bounds for the non-circular coordinate laws.
+    """Convert probability bounds to Beta-distributed coordinate bounds.
 
-    The final two-dimensional direction is parametrised directly by its
-    uniform angle quantile in ``u_bounds``.
+    The last two coordinates use an angle, so they need no Beta conversion.
     """
     beta_bounds = np.empty((len(u_bounds), dimension - 2, 2))
     for level in range(dimension - 2):
@@ -48,12 +72,12 @@ def _directional_mean(
     beta_bounds: np.ndarray,
     coordinate: int,
 ) -> np.ndarray:
-    """Return ``E[Theta_j | A_l]`` for one coordinate in every cell."""
+    """Return one coordinate of the mean direction in every spherical cell."""
     mean = np.ones(len(u_bounds))
     for level in range(coordinate + 1):
         sphere_dimension = dimension - level
         if sphere_dimension == 2:
-            # Theta^(2) = (cos(phi), sin(phi)), with phi = 2 pi U.
+            # In two dimensions, average cosine and sine over the angle interval.
             lower, upper = 2.0 * np.pi * u_bounds[:, level].T
             if coordinate == level:
                 return mean * (np.sin(upper) - np.sin(lower)) / (upper - lower)
@@ -80,7 +104,7 @@ def _fill_quantile_cells(
     first_cell: int,
     level: int,
 ) -> None:
-    """Recursively fill equal-volume quantile cells ``P_l``."""
+    """Split the unit cube into equal-volume boxes, one coordinate at a time."""
     if sphere_dimension <= 2:
         u_edges = np.linspace(0.0, 1.0, cell_count + 1)
         cells[first_cell : first_cell + cell_count, level, 0] = u_edges[:-1]
@@ -99,7 +123,7 @@ def _fill_quantile_cells(
 
 
 def _child_counts(sphere_dimension: int, cell_count: int) -> tuple[int, ...]:
-    """Return final-cell counts assigned to each first-coordinate band."""
+    """Return how many cells to place in each band of the first coordinate."""
     if cell_count <= 1:
         return (cell_count,)
 
@@ -111,13 +135,13 @@ def _child_counts(sphere_dimension: int, cell_count: int) -> tuple[int, ...]:
     base, extra = divmod(cell_count, band_count)
     child_counts = [base + 1] * extra + [base] * (band_count - extra)
     if cell_count > sphere_dimension and max(child_counts) < sphere_dimension:
-        # When m < count < 2m, retain one full m-cell child subtree.
+        # Keep one child large enough to span the remaining dimensions.
         child_counts = [cell_count - sphere_dimension, sphere_dimension]
     return tuple(child_counts)
 
 
 def _coordinate_beta_parameters(sphere_dimension: int) -> tuple[float, float]:
-    """Return the Beta parameters of ``(T_m + 1) / 2``."""
+    """Return Beta parameters for a sphere coordinate shifted from [-1, 1] to [0, 1]."""
     alpha = (sphere_dimension - 1) / 2.0
     return alpha, alpha
 
@@ -125,10 +149,12 @@ def _coordinate_beta_parameters(sphere_dimension: int) -> tuple[float, float]:
 def _beta_interval_moment(
     alpha, beta, v_power, one_minus_v_power, lower, upper
 ) -> np.ndarray:
-    """Return the Beta interval moment over ``[lower, upper]``."""
+    """Integrate ``v**v_power * (1-v)**one_minus_v_power`` over ``[lower, upper]``
+    against the Beta density, without dividing by the interval's probability.
+    """
     shifted_alpha = alpha + v_power
     shifted_beta = beta + one_minus_v_power
-    # ``betainc`` is regularised; this ratio restores the Beta moment.
+    # betainc uses a normalized density; adjust its scale for the changed powers.
     log_normalizer = betaln(shifted_alpha, shifted_beta) - betaln(alpha, beta)
     normalizer = np.exp(log_normalizer)
     lower_probability = betainc(shifted_alpha, shifted_beta, lower)
@@ -136,8 +162,123 @@ def _beta_interval_moment(
     return normalizer * (upper_probability - lower_probability)
 
 
+def _head_moment(remaining, power, tail_power, lower, upper, mass):
+    """Average ``t**power * (1 - t**2)**(tail_power / 2)`` over a coordinate interval."""
+    value = np.zeros(len(lower))
+    negative = lower < 0.0
+    if np.any(negative):
+        value[negative] = (-1.0) ** power * _positive_head_moment(
+            remaining,
+            power,
+            tail_power,
+            -np.minimum(upper[negative], 0.0),
+            -lower[negative],
+            mass[negative],
+        )
+    positive = upper > 0.0
+    if np.any(positive):
+        value[positive] += _positive_head_moment(
+            remaining,
+            power,
+            tail_power,
+            np.maximum(lower[positive], 0.0),
+            upper[positive],
+            mass[positive],
+        )
+    return value
+
+
+def _positive_head_moment(remaining, power, tail_power, lower, upper, mass):
+    # Integrate x = t**2 directly; expanding a shifted power loses precision.
+    alpha = (power + 1.0) / 2.0
+    beta = (tail_power + remaining - 1.0) / 2.0
+    # Compute 1 - t**2 accurately near both zero and one.
+    probability = _beta_interval_probability(
+        alpha,
+        beta,
+        lower * lower,
+        upper * upper,
+        np.where(lower < 0.5, 1.0 - lower * lower, (1.0 - lower) * (1.0 + lower)),
+        np.where(upper < 0.5, 1.0 - upper * upper, (1.0 - upper) * (1.0 + upper)),
+    )
+    with np.errstate(divide="ignore"):
+        log_value = (
+            -np.log(2.0)
+            + betaln(alpha, beta)
+            - betaln(0.5, (remaining - 1.0) / 2.0)
+            + np.log(probability)
+            - np.log(mass)
+        )
+    return np.exp(log_value)
+
+
+def _arc_moment(cosine_power, sine_power, bounds):
+    lower, upper = bounds.T
+    width = 2.0 * np.pi * (upper - lower)
+    value = np.zeros(len(bounds))
+    signs = (
+        1.0,
+        (-1.0) ** cosine_power,
+        (-1.0) ** (cosine_power + sine_power),
+        (-1.0) ** sine_power,
+    )
+    for quadrant in range(4):
+        start, stop = quadrant / 4.0, (quadrant + 1.0) / 4.0
+        left, right = np.maximum(lower, start), np.minimum(upper, stop)
+        active = right > left
+        if not np.any(active):
+            continue
+        left_angle = 2.0 * np.pi * (left[active] - start)
+        right_angle = 2.0 * np.pi * (right[active] - start)
+        x_lower = np.sin(left_angle) ** 2
+        x_upper = np.sin(right_angle) ** 2
+        complement_lower = np.cos(left_angle) ** 2
+        complement_upper = np.cos(right_angle) ** 2
+        x_lower[left[active] == start] = 0.0
+        complement_lower[left[active] == start] = 1.0
+        x_upper[right[active] == stop] = 1.0
+        complement_upper[right[active] == stop] = 0.0
+        cosine, sine = (
+            (cosine_power, sine_power)
+            if quadrant % 2 == 0
+            else (sine_power, cosine_power)
+        )
+        alpha, beta = (sine + 1.0) / 2.0, (cosine + 1.0) / 2.0
+        probability = _beta_interval_probability(
+            alpha,
+            beta,
+            x_lower,
+            x_upper,
+            complement_lower,
+            complement_upper,
+        )
+        with np.errstate(divide="ignore"):
+            contribution = np.exp(
+                -np.log(2.0)
+                + betaln(alpha, beta)
+                + np.log(probability)
+                - np.log(width[active])
+            )
+        value[active] += signs[quadrant] * contribution
+    return value
+
+
+def _beta_interval_probability(
+    alpha, beta, lower, upper, complement_lower, complement_upper
+):
+    """Compute a Beta interval probability without subtracting values near one."""
+    lower_cdf = betainc(alpha, beta, lower)
+    upper_cdf = betainc(alpha, beta, upper)
+    from_lower = upper_cdf - lower_cdf
+    from_upper = betainc(beta, alpha, complement_lower) - betainc(
+        beta, alpha, complement_upper
+    )
+    value = np.where(lower_cdf + upper_cdf <= 1.0, from_lower, from_upper)
+    return np.maximum(value, 0.0)
+
+
 def directions_from_coords(dimension, bounds, coordinates):
-    """Map independent uniform cell coordinates to spherical directions."""
+    """Turn independent uniform values in [0, 1] into directions within the given cells."""
 
     def rec(remaining, level):
         lower, upper = bounds[:, level].T
@@ -154,7 +295,7 @@ def directions_from_coords(dimension, bounds, coordinates):
 
 
 def direction_cdf(unit):
-    """Invert spherical directions to the recursive uniform coordinates."""
+    """Convert directions back to the [0, 1] coordinates used to construct the cells."""
     dimension = unit.shape[1]
     coordinates = np.empty((len(unit), dimension - 1))
     tail = unit

@@ -1,4 +1,4 @@
-"""Shared array boundaries."""
+"""Shared point-shape conversion and input validation."""
 
 from operator import index
 

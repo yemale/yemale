@@ -1,4 +1,4 @@
-"""Smooth potentials and predictive pullbacks on the site-hull interior."""
+"""Smooth transport, numerical inversion, and source distributions."""
 
 from dataclasses import dataclass
 
@@ -13,10 +13,10 @@ from .transport import Transport
 
 @dataclass(eq=False)
 class SmoothMap:
-    """A differentiable view of a fitted max-affine potential.
+    """A smooth transport that blends target centres instead of choosing one.
 
-    A pullback is a predictive law. It is a DH completion only if its target
-    law has equal cell masses and its inverse preserves the cell labels.
+    Build with ``Transport.smooth``. Source queries follow Transport's shape
+    conventions. ``inverse`` maps target points back to source coordinates.
     """
 
     _transport: Transport
@@ -26,9 +26,9 @@ class SmoothMap:
         temperature = self._tau * self._transport._source_scale
         return f"SmoothMap(transport={self._transport!r}, temperature={temperature})"
 
-    def __call__(self, score):
+    def __call__(self, point):
         """Map each source point to a softmax average of target centres."""
-        points, shape = self._transport._query(score)
+        points, shape = self._transport._query(point)
         value = smooth.read(
             points,
             self._transport._centered_target,
@@ -37,19 +37,19 @@ class SmoothMap:
         )
         return restore(value + self._transport._target_center, shape)
 
-    def potential(self, score):
-        points, shape = self._transport._query(score)
+    def potential(self, point):
+        """Return the smooth potential in source coordinates; its gradient is this map."""
+        points, shape = self._transport._query(point)
         value = smooth.potential(
             points,
             self._transport._centered_target,
             self._transport._affine_offsets,
             self._tau,
         )
-        value += points @ self._transport._target_center
-        return restore(self._transport._source_scale * value, shape)
+        return restore(self._transport._scale_potential(points, value), shape)
 
-    def _statistics(self, score):
-        points, shape = self._transport._query(score)
+    def _statistics(self, point):
+        points, shape = self._transport._query(point)
         mapped, jacobian = smooth.map_jacobian(
             points,
             self._transport._centered_target,
@@ -59,22 +59,30 @@ class SmoothMap:
         mapped += self._transport._target_center
         return mapped, jacobian / self._transport._source_scale, shape
 
-    def jacobian(self, score):
-        _, jacobian, shape = self._statistics(score)
+    def jacobian(self, point):
+        """Differentiate the map with respect to original source coordinates.
+
+        Return ``(d, d)`` for one point or ``(..., d, d)`` for a batch.
+        """
+        _, jacobian, shape = self._statistics(point)
         return restore(jacobian, shape)
 
-    def map_jacobian(self, score):
-        """Return mapped points and Jacobians from the same softmax weights."""
-        mapped, jacobian, shape = self._statistics(score)
+    def map_jacobian(self, point):
+        """Return ``(self(point), self.jacobian(point))`` with shared computation."""
+        mapped, jacobian, shape = self._statistics(point)
         return restore(mapped, shape), restore(jacobian, shape)
 
-    def law(self, score):
-        """Return the softmax mixture of reference-cell laws for one score."""
+    def reference_distribution(self, point):
+        """Return the reference-cell mixture weighted by the smooth map at one point.
+
+        Requires a Reference target; samples stay in reference coordinates.
+        """
         reference = self._transport._require_reference()
-        points, _ = self._transport._query(score)
+        points, _ = self._transport._query(point)
         if len(points) != 1:
             raise ValueError(
-                f"law expects one point; got {len(points)}. Call law once per point."
+                f"reference_distribution expects one point; got {len(points)}. "
+                "Call reference_distribution once per point."
             )
         weight = smooth.weights(
             points,
@@ -89,17 +97,15 @@ class SmoothMap:
             raise ValueError("target must be finite")
         sites = self._transport._target
         matrix, center, scale = self._transport._inverse_domain
-        message = (
-            "target must lie strictly inside the convex hull of target centers. "
-            "If a forward result rounded to the boundary, "
-            "increase temperature and recompute it."
-        )
+        message = "target must lie strictly inside the convex hull of target centers"
         if sites.shape[1] == 1:
             if np.any(targets <= sites.min()) or np.any(targets >= sites.max()):
                 raise ValueError(message)
             return
         from scipy.optimize import linprog
 
+        # Express the target as a weighted average of the centres and their mean.
+        # Positive weight on the mean puts it strictly inside the convex hull.
         objective = np.zeros(len(sites) + 1)
         objective[-1] = -1.0
         for target in targets:
@@ -119,48 +125,50 @@ class SmoothMap:
                 },
             )
             if not result.success or result.x[-1] <= 1e-8:
-                raise ValueError(message + " A numerical interior margin is required.")
+                raise ValueError(message)
 
     def inverse(self, target):
-        """Invert on the strict site-hull interior, with target residual <= 1e-9.
+        """Map target points back to source coordinates.
 
-        The residual does not bound source-coordinate error near the hull
-        boundary. Rank-deficient sites do not define a unique inverse. In
-        dimension > 1, a linear program per target certifies an interior
-        center-mixture weight above 1e-8, conservatively excluding its boundary.
+        Targets must lie strictly inside the convex hull of the target centres.
         """
         sites = self._transport._centered_target
         targets, shape = rows(target, sites.shape[1], "target")
         self._check_targets(targets)
-        targets = targets - self._transport._target_center
-        offsets = self._transport._affine_offsets
+        # Keep the stopping tolerance independent of target units.
+        scale = self._transport._inverse_domain[2]
+        sites = sites / scale
+        targets = (targets - self._transport._target_center) / scale
+        offsets = self._transport._affine_offsets / scale
+        temperature = self._tau / scale
+        source_potential = self._transport._source_potential / scale
         starts = smooth.read(
             targets,
             self._transport._normalized_sources,
-            self._transport._source_potential,
-            self._tau,
+            source_potential,
+            temperature,
         )
-        result, residual = smooth.inverse(targets, starts, sites, offsets, self._tau)
+        result, residual = smooth.inverse(targets, starts, sites, offsets, temperature)
         failed = ~(residual <= 1e-9)
         if np.any(failed):
-            # Retry difficult rows along smoother problems with the same target.
-            tau = max(self._tau, float(np.ptp(offsets)), 0.05)
+            # Solve at decreasing temperatures, using each solution to start the next.
+            tau = max(temperature, float(np.ptp(offsets)), 0.05)
             trial = smooth.read(
                 targets[failed],
                 self._transport._normalized_sources,
-                self._transport._source_potential,
+                source_potential,
                 tau,
             )
             for _ in range(64):
                 trial, error = smooth.inverse(
                     targets[failed], trial, sites, offsets, tau
                 )
-                if not np.all(error <= 1e-9) or tau == self._tau:
+                if not np.all(error <= 1e-9) or tau == temperature:
                     break
-                tau = max(self._tau, tau * 0.5)
-            if tau != self._tau or not np.all(error <= 1e-9):
+                tau = max(temperature, tau * 0.5)
+            if tau != temperature or not np.all(error <= 1e-9):
                 raise RuntimeError(
-                    "smooth inverse did not converge; increase temperature or move away from the hull boundary"
+                    "smooth inverse did not converge at this temperature"
                 )
             result[failed] = trial
         return restore(
@@ -169,10 +177,10 @@ class SmoothMap:
         )
 
     def pullback(self, target_law):
-        """Pull back a target law supported inside the site hull.
+        """Return the distribution obtained by mapping ``target_law`` through inverse.
 
-        This does not itself enforce the cell-preservation condition for DH.
-        Support of a user-mapped target law is checked when it is inverted.
+        This is a Dempster-Hill predictive distribution only when reference cells
+        have equal probability and the inverse preserves their labels.
         """
         target_law = target_law if isinstance(target_law, Law) else Law(target_law)
         if target_law.reference.dimension != self._transport._target.shape[1]:
@@ -188,11 +196,12 @@ class SmoothMap:
             and np.all(target_law.weights > 0.0)
         ):
             raise ValueError(
-                "the full reference law is not supported inside the hull of its cell centers"
+                "cannot pull back the full reference distribution: some of its "
+                "support lies outside the smooth inverse domain"
             )
 
-        def backward(score):
-            mapped, jacobian, _ = self._statistics(score)
+        def backward(point):
+            mapped, jacobian, _ = self._statistics(point)
             sign, logdet = np.linalg.slogdet(jacobian)
             return mapped, np.where(sign > 0.0, logdet, -np.inf)
 

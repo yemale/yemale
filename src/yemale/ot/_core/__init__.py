@@ -1,1 +1,1 @@
-"""Private numerical kernels."""
+"""Internal numerical routines."""

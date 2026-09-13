@@ -1,4 +1,4 @@
-"""Leave-one assignment by Jonker--Volgenant and reduced costs."""
+"""Find assignment costs for each candidate target using Jonker-Volgenant."""
 
 from __future__ import annotations
 
@@ -144,6 +144,7 @@ def _loo_costs(cost, c2r, u, v, free_target, base):
 
 @njit(cache=True, boundscheck=False)
 def assign(base, predecessor, free_target, reserved):
+    """Return target-to-row indices, assigning the candidate row to ``reserved``."""
     result = base.copy()
     target = reserved
     while target != free_target:
@@ -179,7 +180,7 @@ def assignments(base, predecessor, free_target, labels):
 
 
 def solve_1d(source: np.ndarray, target: np.ndarray):
-    """Solve leave-one costs -source * target by monotone sorting."""
+    """Sort sources and targets to compute costs with each target left out."""
     source_order = np.argsort(source, kind="stable")
     target_order = np.argsort(target, kind="stable")
     x = source[source_order]
@@ -211,7 +212,12 @@ def solve_1d(source: np.ndarray, target: np.ndarray):
 def solve(
     cost: np.ndarray, row_bias: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-    """Return leave-one costs and their tree; row_bias only seeds the matching."""
+    """Compute minimum assignment costs with each target left for the candidate.
+
+    ``cost`` has n source rows plus a zero-cost row, and n + 1 target columns.
+    Return costs, target-to-row indices, predecessors, and the free target.
+    ``row_bias`` only seeds the matching; it does not change the objective.
+    """
     total, free_column, column_to_row, u, v = _lapjv(cost, row_bias)
     free_column = int(free_column)
     leave_one, pred = _loo_costs(cost, column_to_row, u, v, free_column, float(total))

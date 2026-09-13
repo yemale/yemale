@@ -1,4 +1,4 @@
-"""Independent checks for hard candidate-augmented transport."""
+"""Compare transport labels and assignments with an independent solver."""
 
 import numpy as np
 import pytest
@@ -111,11 +111,15 @@ def test_parallel_batch_matches_individual_queries():
         transport.rank(points), [transport.rank(point) for point in points]
     )
     expected = np.array([transport.assignment(point) for point in points])
-    for batch in (points[:2], points.reshape(2, 2048, 3)):
+    for batch in (
+        points[:1],
+        points[:1].reshape(1, 1, 3),
+        points[:2],
+        points.reshape(2, 2048, 3),
+    ):
         assignments = transport.assignment(batch)
         assert assignments.shape == batch.shape[:-1] + (21,)
         assert np.array_equal(assignments.reshape(-1, 21), expected[: batch.size // 3])
-    assert np.array_equal(transport.assignment(points[:1]), expected[0])
     assert transport.assignment(points[:0]).shape == (0, 21)
     for batch in (points[0], points.reshape(2, 2048, 3), points[:0]):
         result = transport.evaluate(batch)
@@ -154,6 +158,24 @@ def test_fit_rejects_invalid_source_or_target():
         ot.fit(source, target=target)
 
 
+def test_unrepresentable_queries_and_potentials_raise():
+    transport = ot.fit([[0.0, 0.0]], target=[[1e150, 0.0], [0.0, 1e150]])
+    assert transport.label([1.0, 2.0]) == 1
+    with pytest.raises(ValueError, match="finite target comparisons"):
+        transport.label([1e200, 2e200])
+    transport = ot.fit(
+        [[-1e200, 0.0], [1e200, 0.0]],
+        target=[[-1e150, 0.0], [0.0, 1e150], [1e150, 0.0]],
+    )
+    assert transport.label([2e200, 0.0]) == 2
+    for mapping in (transport, transport.smooth()):
+        with pytest.raises(ValueError, match="potential is not representable"):
+            mapping.potential([2e200, 0.0])
+    shifted = ot.fit([[1e200, 0.0]], target=[[1e150, 0.0], [0.0, 1e150]])
+    with pytest.raises(ValueError, match="phi is not representable"):
+        _ = shifted.phi
+
+
 def test_reference_barycentres_are_first_cell_moments():
     for n in (0, 3):
         reference = ot.Reference(n=n, dimension=2)
@@ -168,6 +190,32 @@ def test_reference_barycentres_are_first_cell_moments():
         beta.directional_barycentres(3, 4)[0],
         [-0.75, 0.0, 0.0],
     )
+
+
+def test_one_dimensional_transport_recovers_dempster_hill():
+    source = np.array([-3.0, -1.0, 2.0, 5.0])
+    transport = ot.fit(source[:, None])
+    points = np.array([-4.0, -2.0, 0.0, 3.0, 6.0])
+    labels = np.searchsorted(source, points, side="left")
+    width = 2 / (len(source) + 1)
+
+    np.testing.assert_array_equal(transport.label(points), labels)
+    np.testing.assert_allclose(
+        transport(points)[:, 0], width * (labels + 0.5) - 1, atol=1e-15
+    )
+    np.testing.assert_allclose(np.diff(transport.phi), width * source)
+
+    kernel = transport.reference_distribution(0.0)
+    np.testing.assert_allclose(kernel.mean(), [0.0], atol=1e-15)
+    np.testing.assert_allclose(kernel.covariance(), [[width**2 / 12]])
+    np.testing.assert_allclose(kernel.pdf(0.0), 1 / width)
+    np.testing.assert_allclose(kernel.entropy(), np.log(width))
+
+    region = transport.quantile_region(0.5)
+    np.testing.assert_array_equal(region.labels, [1, 2, 3])
+    assert region.coverage == 3 / 5
+    np.testing.assert_array_equal(region.contains([-2.0, 0.0, 4.0]), True)
+    np.testing.assert_array_equal(region.contains([-4.0, 6.0]), False)
 
 
 def test_leave_one_row_symmetry_gives_a_permutation_of_labels():
@@ -191,6 +239,32 @@ def test_cell_geometry_in_original_coordinates():
     matrix, offset = transport.halfspaces(1)
     np.testing.assert_allclose(matrix, [[-2], [2]])
     np.testing.assert_allclose(offset, [-2, 10])
+    branches = points[:, None] * transport._target[:, 0] - transport.phi
+    np.testing.assert_allclose(branches.max(axis=1), transport.potential(points))
+    assert not transport.phi.flags.writeable
+
+
+def test_quantile_region_uses_the_smallest_reference_radius_with_enough_mass():
+    rng = np.random.default_rng(10)
+    transport = ot.fit(rng.normal(size=(9, 2)))
+    region = transport.quantile_region(0.5)
+    ranks = transport.reference.ranks
+
+    np.testing.assert_array_equal(region.labels, np.flatnonzero(ranks <= region.radius))
+    assert region.coverage == 0.7
+    tolerance = 16 * np.finfo(float).eps * max(1.0, region.radius)
+    assert (ranks < region.radius - tolerance).sum() / len(ranks) < 0.5
+    points = rng.normal(size=(20, 2))
+    np.testing.assert_array_equal(
+        region.contains(points), transport.rank(points) <= region.radius
+    )
+    assert len(region.halfspaces()) == len(region.labels)
+    assert not region.labels.flags.writeable
+
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        transport.quantile_region(1.1)
+    with pytest.raises(ValueError, match="requires reference cells"):
+        ot.fit([[0.0]], target=[[-1.0], [1.0]]).quantile_region(0.5)
 
 
 @pytest.mark.parametrize("dimension", [1, 2])

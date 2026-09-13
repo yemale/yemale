@@ -1,4 +1,4 @@
-"""Streaming reads of max-affine labels."""
+"""Batched target-label lookup without storing all query-target scores."""
 
 import numpy as np
 from numba import njit, prange

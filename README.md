@@ -1,11 +1,9 @@
 # yemale
 
-Exact candidate-augmented transport for vector point clouds.
+Multivariate ranks and quantile regions with candidate-augmented optimal transport.
 
-Fit `n` source points once. Each query adds one candidate to an optimal
-assignment of `n + 1` points to fixed target barycentres under squared Euclidean
-cost, without solving a new assignment problem. The default targets are
-barycentres of equal-mass Dempster–Hill reference cells.
+Fit `n` observations once. Each query adds its candidate to an optimal assignment
+of `n + 1` points, without solving a new assignment problem.
 
 ## Install
 
@@ -15,35 +13,40 @@ Requires Python 3.10–3.14.
 python -m pip install "git+https://github.com/yemale/yemale.git@main"
 ```
 
-## Use
+## Quantile regions
 
 ```python
+import numpy as np
 import yemale.ot as ot
 
-source = [[-1.0, 0.0], [0.0, 1.0], [1.0, -0.5]]  # shape (n, d)
-z = [0.2, 0.4]
+observations = np.random.default_rng(0).normal(size=(99, 2))
+T = ot.fit(observations)
+region = T.quantile_region(coverage=0.9)
 
-T = ot.fit(source)
-T(z)             # assigned target barycentre
-T.rank(z)        # its radius
-T.sign(z)        # its direction
-T.assignment(z)  # target indices for the source points, followed by z
+region.contains([[0.2, 0.4], [5.0, 5.0]])  # array([True, False])
+region.coverage                            # 0.9
 ```
 
-The queries above accept batches. Each candidate gets its own `n + 1` assignment.
+Queries accept one point or a batch. `region.coverage` gives the achieved level,
+which can exceed the request when whole cells are included together.
+See the [guide](docs/usage.md#quantile-regions) for coverage assumptions.
 
-`T.law(z)` gives the probability law inside the assigned reference cell.
-`T.smooth()` gives a smooth transport map.
+## Distributions
 
-To supply target barycentres instead of the default reference construction:
+The reference distribution has uniform radius and direction in the unit ball.
 
 ```python
-T = ot.fit(source, target=target)  # target: (n + 1, d)
+nu = T.reference
+nu.sample(size=1000, rng=0)
+nu.moment(powers=(2, 2))  # exact E[U_1^2 U_2^2]
+nu.covariance()
 ```
 
-`target` is expressed in the source-centred, globally scaled coordinates used
-internally for the assignment. Returned target points retain the values you
-provide.
+To sample in the observed space, choose how probability fills each assigned cell.
+The [predictive distribution example](docs/usage.md#predictive-distributions)
+shows that choice, sampling, and expectations in one runnable workflow.
+
+The [guide](docs/usage.md) also covers ranks, assignments, potentials, and smoothing.
 
 ## License
 

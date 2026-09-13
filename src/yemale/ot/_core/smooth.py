@@ -1,4 +1,4 @@
-"""Stable softmax reads and conjugate inversion."""
+"""Softmax averages, derivatives, and inverse maps computed with Newton's method."""
 
 import numpy as np
 from numba import get_num_threads, njit, prange
@@ -88,7 +88,7 @@ def _row_statistics(point, sites, offsets, tau, weight, mapped, jacobian):
         mapped[r] = 0.0
         for j in range(len(sites)):
             mapped[r] += weight[j] * sites[j, r]
-    # Center first: E[mm'] - E[m]E[m]' loses small, positive tail derivatives.
+    # Center sites around the mapped point to avoid cancellation in small derivatives.
     for r in range(dimension):
         for c in range(r + 1):
             total = 0.0
@@ -146,7 +146,7 @@ def _inverse_one(target, start, sites, offsets, tau, tolerance, max_iterations, 
         if not np.isfinite(jacobian).all():
             output[:] = point
             return np.inf
-        # A tiny ridge safeguards the Newton solve after softmax saturation.
+        # Add to the diagonal to keep the Newton step solvable near zero derivatives.
         ridge = 1e-12 * max(jacobian.max(), 1.0)
         for k in range(dimension):
             jacobian[k, k] += ridge
