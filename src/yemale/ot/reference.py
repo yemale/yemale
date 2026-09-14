@@ -14,11 +14,22 @@ from ._core import beta
 
 @dataclass(frozen=True, eq=False)
 class Reference:
-    """A distribution on the unit ball, split into ``n + 1`` equal-probability cells.
+    r"""A distribution on the unit ball, split into ``n + 1`` equal-probability cells.
 
     The direction is uniform on the sphere, independently of a radius uniform
     on ``[0, 1]``. In one dimension, this is uniform on ``[-1, 1]``.
     ``n`` is the calibration size; the extra cell accounts for the candidate.
+    Write nu for this law, L_j for its cells, and d for ``dimension``:
+
+    .. math::
+
+        U=R\Theta,\quad R\sim\mathrm{Uniform}[0,1],\quad
+        \Theta\sim\mathrm{Uniform}(\mathbb S^{d-1}),\quad R\perp\Theta,
+        \qquad \nu(L_j)=\frac1{n+1}.
+
+    Attributes:
+        n: Source size; the reference contains n + 1 cells.
+        dimension: Number of coordinates.
     """
 
     n: int
@@ -61,7 +72,12 @@ class Reference:
 
     @cached_property
     def centers(self):
-        """Mean reference point in each cell, with shape ``(n + 1, dimension)``."""
+        r"""Mean reference point in each cell, with shape ``(n + 1, dimension)``.
+
+        .. math::
+
+            m_j=\mathbb E_\nu[U\mid U\in L_j].
+        """
         lower, upper, bounds = self._partition
         radial_mean = (lower + upper) / 2.0
         if self.dimension == 1:
@@ -189,10 +205,10 @@ class Reference:
         return restore(labels, shape)
 
     def logpdf(self, value):
-        """Return log density with respect to volume, not cell mass.
+        """Return the natural logarithm of ``pdf(value)``.
 
-        Accept a point ``(d,)`` or batch ``(..., d)``. Return ``-inf`` outside
-        the unit ball and ``+inf`` at the origin when ``dimension > 1``.
+        Accept ``(d,)`` or ``(..., d)``; return one value per point.
+        Return ``-inf`` outside the ball and ``+inf`` at the origin for d > 1.
         """
         points, shape = rows(value, self.dimension, "target")
         radius, support = _radius_support(points)
@@ -204,17 +220,38 @@ class Reference:
         return restore(density, shape)
 
     def pdf(self, value):
-        """Return the density at a point ``(d,)`` or batch ``(..., d)``."""
+        r"""Return density per unit volume at ``(d,)`` or ``(..., d)`` points.
+
+        .. math::
+
+            p_\nu(u)=\frac{\Gamma(d/2)}{2\pi^{d/2}}\|u\|^{1-d},
+            \qquad 0<\|u\|\leq1.
+
+        Return one value per point, zero outside the unit ball.
+        At the origin the density is infinite for d > 1; in d = 1 it is 1/2.
+        """
         return np.exp(self.logpdf(value))
 
+    def density_region(self, mass, *, n_integration_points=256):
+        """Select a reference-density superlevel set by approximate probability mass.
+
+        Include all ties. ``n_integration_points`` sets the points per cell.
+        Return a DensityRegion with ``contains``, ``threshold``, and ``mass``.
+        """
+        return self._law.density_region(mass, n_integration_points=n_integration_points)
+
     def expect(self, function, *, n_integration_points=64, rng=None):
-        """Approximate ``E[function(X)]``.
+        r"""Approximate ``E[function(U)]`` for a reference point U.
+
+        .. math::
+
+            \mathbb E_\nu[f(U)]=\int f(u)\,\nu(du).
 
         ``function`` receives points ``(q, d)`` and returns values ``(q, ...)``.
         The result averages over points and keeps the remaining axes.
         ``n_integration_points`` is the number of points per cell.
-        ``rng=None`` uses fixed points; a seed or NumPy generator draws random
-        points independently within each cell.
+        ``rng=None`` uses fixed points (interval midpoints in 1-D, Halton points
+        otherwise). A seed or NumPy generator draws random points within each cell.
         """
         return self._law.expect(
             function,
@@ -223,22 +260,48 @@ class Reference:
         )
 
     def moment(self, powers):
-        """Return the exact raw moment ``E[prod_j X[j] ** powers[j]]``.
+        r"""Return an exact raw moment, with one power per coordinate.
 
-        ``powers`` contains one nonnegative integer per coordinate.
+        ``powers`` gives the nonnegative integers in alpha.
+        For example, ``moment((2, 0))`` means ``E[U[0]**2]``.
+        Any odd power gives zero. For even powers, with :math:`|\alpha|` their sum,
+
+        .. math::
+
+            \mathbb E_\nu\!\left[\prod_{r=1}^d U_r^{\alpha_r}\right]
+            =\frac{1}{|\alpha|+1}
+            \frac{\Gamma(d/2)}{\Gamma((d+|\alpha|)/2)}
+            \prod_{r=1}^d\frac{\Gamma((\alpha_r+1)/2)}{\Gamma(1/2)}.
         """
         return _reference_moment(self.dimension, _multi_index(powers, self.dimension))
 
     def mean(self):
-        """Return ``E[X]`` as a vector of length ``dimension``."""
+        r"""Return the mean reference point: a zero vector of length ``dimension``.
+
+        .. math::
+
+            \mathbb E_\nu[U]=0.
+        """
         return np.zeros(self.dimension)
 
     def covariance(self):
-        """Return ``E[(X - E[X]) (X - E[X]).T]`` as a square matrix."""
+        r"""Return the covariance: identity divided by ``3 * dimension``.
+
+        .. math::
+
+            \mathrm{Cov}_\nu(U)=\mathbb E_\nu[UU^\top]=\frac{I_d}{3d}.
+
+        The result has shape ``(dimension, dimension)``.
+        """
         return np.eye(self.dimension) / (3 * self.dimension)
 
     def entropy(self):
-        """Return differential entropy ``-E[log(pdf(X))]``, in nats."""
+        r"""Return differential entropy ``-E[log(pdf(U))]``, in nats.
+
+        .. math::
+
+            h(\nu)=\log\left(\frac{2\pi^{d/2}}{\Gamma(d/2)}\right)-(d-1).
+        """
         return self._log_area - self.dimension + 1
 
 

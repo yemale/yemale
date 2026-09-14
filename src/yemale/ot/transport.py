@@ -20,6 +20,9 @@ class Transport:
     Queries use original source coordinates: ``(d,)`` or ``(..., d)``.
     Map and sign outputs keep the coordinate axis; label, rank and potential
     outputs do not. In one dimension, scalar and flat-vector queries also work.
+
+    Attributes:
+        reference: Reference used to construct the targets, or None for array targets.
     """
 
     _target: np.ndarray
@@ -43,7 +46,11 @@ class Transport:
 
     @cached_property
     def phi(self):
-        """Branch offsets in ``max_j <z, m_j> - phi[j]``, in source coordinates."""
+        """Branch offsets in ``potential``, with shape ``(n + 1,)``.
+
+        Use original source coordinates. A common additive constant is fixed
+        by the fit; it does not affect assignments or derivatives.
+        """
         with np.errstate(over="ignore", invalid="ignore"):
             value = (
                 self._target @ self._source_center
@@ -103,17 +110,43 @@ class Transport:
         return restore(labels, shape)
 
     def __call__(self, point) -> np.ndarray:
-        """Return assigned target centres for a point ``(d,)`` or batch ``(..., d)``."""
+        r"""Map source points to their assigned centres in target coordinates.
+
+        .. math::
+
+            T(z)=m_{k(z)},\qquad k(z)=\sigma_z(n+1).
+
+        Accept a point ``(d,)`` or batch ``(..., d)`` and keep its shape.
+        Here sigma_z is the augmented assignment from ``fit``, and m_j are
+        the target centres. With the default reference, outputs lie in the unit ball.
+        """
         labels, shape = self._labels(point)
         return restore(self._target[labels], shape)
 
     def rank(self, point) -> np.ndarray:
-        """Return the assigned target's radius (distance from the origin)."""
+        r"""Return the center-outward rank: the radius of the assigned target.
+
+        .. math::
+
+            \mathrm{Rank}(z)=\|T(z)\|.
+
+        Smaller radii indicate more central reference cells. Default-reference
+        ranks take discrete values in ``[0, 1)``; the minimum need not be zero.
+        Custom targets retain their own radii. Return one value per candidate.
+        """
         labels, shape = self._labels(point)
         return restore(self._ranks[labels], shape)
 
     def sign(self, point) -> np.ndarray:
-        """Return the assigned target's unit direction; a zero target gives zero."""
+        r"""Return the assigned target's unit direction; a zero target gives zero.
+
+        .. math::
+
+            \mathrm{Sign}(z)=T(z)/\|T(z)\|\qquad\text{when }T(z)\ne0.
+
+        This direction is in target space, not from the source mean to the point.
+        Return one vector per candidate, keeping the coordinate axis.
+        """
         labels, shape = self._labels(point)
         return restore(self._signs[labels], shape)
 
@@ -135,9 +168,15 @@ class Transport:
         }
 
     def potential(self, point):
-        """Return the convex potential whose gradient is this map away from ties.
+        r"""Return the convex potential whose gradient is this map away from ties.
 
-        Values use original source coordinates, with one scalar per candidate.
+        .. math::
+
+            \Phi(z)=\max_{1\leq j\leq n+1}\{\langle z,m_j\rangle-\phi_j\}.
+
+        Here m_j are the targets and phi_j are the offsets in ``phi``.
+        Accept ``(d,)`` or ``(..., d)`` in original source coordinates;
+        return one scalar per candidate.
         """
         normalized, shape = self._query(point)
         labels = self._maximize(normalized)
@@ -158,7 +197,16 @@ class Transport:
         return value
 
     def halfspaces(self, label):
-        """Return A, b describing the source cell, including its boundary: A @ z <= b."""
+        r"""Return A, b describing the closed source cell: ``A @ z <= b``.
+
+        .. math::
+
+            V_j=\bigcap_{k\ne j}\{z:\langle z,m_k-m_j\rangle
+            \leq\phi_k-\phi_j\}.
+
+        For a label in ``0, ..., n``, return shapes ``(n, d)`` and ``(n,)``.
+        Closed cells share boundaries; ``label(point)`` assigns boundary points.
+        """
         if not isinstance(label, (int, np.integer)) or not 0 <= label < len(
             self._target
         ):
@@ -173,10 +221,23 @@ class Transport:
         return matrix, matrix @ self._source_center + offset
 
     def quantile_region(self, coverage):
-        """Return the smallest quantile region reaching the requested ``coverage``.
+        r"""Return the smallest quantile region reaching the requested ``coverage``.
 
-        Its achieved coverage can be larger because cells at the same radius are
-        included together. Requires the default reference-cell construction.
+        .. math::
+
+            \Omega_r=\{z:\|T(z)\|\leq r\},\qquad
+            J_r=\{j:\|m_j\|\leq r\}.
+
+        ``coverage`` is a probability in [0, 1], not the radius r. Choose the
+        smallest r >= 0 with :math:`|J_r|/(n+1)` at least this probability.
+        Under exchangeability and almost-sure uniqueness of the augmented
+        assignment, the region covers the next
+        observation with probability ``region.coverage``, averaging over fitted
+        observations and the next candidate, not conditional on one fitted sample.
+
+        Equal-radius cells enter together, so achieved coverage can exceed the
+        request. Selecting every cell gives the whole space, even for a request
+        below 1. Requires the default reference-cell construction.
         """
         reference = self._require_reference()
         try:
@@ -218,10 +279,14 @@ class Transport:
         return restore(assignment[None], shape)
 
     def reference_distribution(self, point):
-        """Return the reference distribution within one candidate's assigned cell.
+        r"""Return the reference distribution within one candidate's assigned cell.
+
+        .. math::
+
+            K(z,\cdot)=\nu(\,\cdot\mid L_{k(z)}).
 
         Samples are reference points, not predictions in source coordinates.
-        Requires a Reference target.
+        Accept one candidate; return a Law. Requires a Reference target.
         """
         from .law import Law
 
@@ -237,29 +302,48 @@ class Transport:
     def predictive_distribution(
         self, map_from_reference, *, inverse=None, inverse_logabsdet=None
     ):
-        """Create a predictive distribution.
+        r"""Create a predictive Law by choosing how to fill each source cell.
 
-        The transport divides source space into one cell per target. This method
-        gives every cell equal probability. ``map_from_reference`` chooses how
-        probability is distributed within each cell.
+        Write Q_j for ``map_from_reference`` on reference cell L_j.
+        Map each L_j into its matching source cell; each gets probability 1 / (n + 1).
+
+        .. math::
+
+            \Pi^Z=\frac1{n+1}\sum_{j=1}^{n+1}
+            (Q_j)_\#\nu(\,\cdot\mid L_j).
+
+        This is the law of Q_j(U) after drawing a cell uniformly and U within it.
+        Q_j chooses a distribution inside the cell; it is not an inverse of T.
 
         Args:
-            map_from_reference: Called with reference points and their cell labels.
-                It returns one predictive value in the matching assigned cell for
-                each input row. It must be one-to-one for density evaluation.
+            map_from_reference: Called as ``map_from_reference(points, labels)``
+                with reference points ``(q, d)`` and cell labels ``(q,)``. Returns
+                points ``(q, d)`` in the matching source cells.
+                For density, use a differentiable, one-to-one map with nonsingular
+                Jacobian.
             inverse: Optional inverse called as
                 ``inverse(source_points, cell_labels)``. Supply with
-                ``inverse_logabsdet`` for density and entropy.
+                ``inverse_logabsdet`` for density and entropy. Returns ``(q, d)``.
             inverse_logabsdet: Optional callable with the same inputs as ``inverse``.
-                It returns the inverse Jacobian's log absolute determinant.
+                Returns the inverse Jacobian's log absolute determinant, as a
+                scalar, ``(q,)``, or ``(q, 1)``.
 
         Notes:
-            ``map_from_reference`` must map reference cell j into source cell j.
             Callbacks must treat input points as read-only.
+            Outside the mapped support, the inverse may return finite placeholders
+            paired with a ``-inf`` log determinant.
         """
         from .law import Law
 
         reference = self._require_reference()
+        if not callable(map_from_reference):
+            raise TypeError("map_from_reference must be callable as (points, labels)")
+        for name, callback in (
+            ("inverse", inverse),
+            ("inverse_logabsdet", inverse_logabsdet),
+        ):
+            if callback is not None and not callable(callback):
+                raise TypeError(f"{name} must be callable as (points, labels)")
         if (inverse is None) != (inverse_logabsdet is None):
             raise ValueError("inverse and inverse_logabsdet must be supplied together")
         backward = None
@@ -279,10 +363,7 @@ class Transport:
                 jacobian[reference.locate(target) != labels] = -np.inf
                 return target, jacobian
 
-        def forward(labels, points):
-            return map_from_reference(points, labels)
-
-        return Law(reference, forward=forward, backward=backward)
+        return Law(reference, forward=map_from_reference, backward=backward)
 
     def smooth(self, temperature=None):
         """Return a SmoothMap that blends target centres instead of choosing one.
@@ -348,7 +429,12 @@ class Transport:
 
 @dataclass(frozen=True, eq=False, repr=False)
 class QuantileRegion:
-    """A finite-sample union of source cells selected by reference radius."""
+    """A finite-sample union of source cells selected by reference radius.
+
+    Attributes:
+        radius: Reference-centre radius cutoff defining the region.
+        labels: Zero-based labels of the included reference cells.
+    """
 
     _transport: Transport
     radius: float
@@ -362,7 +448,11 @@ class QuantileRegion:
 
     @property
     def coverage(self):
-        """Finite-sample coverage of this region."""
+        """Fraction of reference cells included in the region.
+
+        Under the assumptions in ``quantile_region``, this is the next
+        observation's marginal coverage, not coverage conditional on the fit.
+        """
         return len(self.labels) / len(self._transport._target)
 
     def contains(self, point):
@@ -375,9 +465,17 @@ class QuantileRegion:
 
 
 def fit(source, *, target=None) -> Transport:
-    """Fit a reusable Transport from n observations to n + 1 targets.
+    r"""Fit a reusable Transport from n observations to n + 1 targets.
 
-    Each later query supplies the extra candidate in original source coordinates.
+    Each later query appends one candidate: zeta(z) = (Z_1, ..., Z_n, z).
+    With target centres m_j, its assignment minimizes squared Euclidean cost:
+
+    .. math::
+
+        \sigma_z\in\arg\min_{\sigma\in\mathfrak S_{n+1}}
+        \sum_{i=1}^{n+1}\|\zeta_i(z)-m_{\sigma(i)}\|^2.
+
+    A query uses original source coordinates and does not solve a new assignment.
 
     Args:
         source: Finite observations of shape ``(n, d)``. Use ``(n, 1)`` for scalar data.
@@ -391,6 +489,8 @@ def fit(source, *, target=None) -> Transport:
         ``8 * (n + 1)**2`` bytes. The one-dimensional solver avoids this matrix.
         Sources are centred and divided by their root-mean-square distance from
         the mean, using one scale for all coordinates (1 for identical sources).
+        Coordinates are not standardized separately; if needed, choose feature
+        scales independently of calibration and apply them to sources and queries.
         Assignment labels are invariant to a common target translation or positive
         scalar rescaling, up to floating-point precision. Returned targets retain
         the supplied values.

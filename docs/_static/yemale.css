@@ -1,0 +1,133 @@
+/* Typography and light palette from the paper's yemale.sty. */
+html {
+  --pst-font-family-base: "TeX Gyre Heros", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --pst-font-family-heading: var(--pst-font-family-base);
+  --pst-font-size-h1: 2rem;
+  --pst-font-size-h2: 1.5rem;
+  --pst-font-size-h3: 1.2rem;
+  --pst-font-size-h4: 1.1rem;
+  --pst-font-weight-heading: 700;
+}
+
+html[data-theme="light"] {
+  --pst-color-background: #ffffff;
+  --pst-color-on-background: #ffffff;
+  --pst-color-surface: #eef3f7;
+  --pst-color-on-surface: #171717;
+  --pst-color-text-base: #171717;
+  --pst-color-text-muted: #4f5560;
+  --pst-color-border: #e5e7eb;
+  --pst-color-primary: #344e68;
+  --pst-color-secondary: #344e68;
+  --pst-color-accent: #344e68;
+  --pst-color-link-higher-contrast: #344e68;
+  --pst-color-inline-code: #344e68;
+  --pst-color-target: #eef3f7;
+}
+
+html[data-theme="dark"] {
+  --pst-color-background: #171b20;
+  --pst-color-on-background: #171b20;
+  --pst-color-surface: #222a33;
+  --pst-color-on-surface: #edf0f3;
+  --pst-color-text-base: #edf0f3;
+  --pst-color-text-muted: #b0bac5;
+  --pst-color-border: #3c4855;
+  --pst-color-primary: #afc9e0;
+  --pst-color-secondary: #afc9e0;
+  --pst-color-accent: #afc9e0;
+  --pst-color-link-higher-contrast: #afc9e0;
+  --pst-color-inline-code: #afc9e0;
+  --pst-color-target: #2d3b49;
+}
+
+.bd-article {
+  font-family: "TeX Gyre Pagella", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 1.125rem;
+  line-height: 1.6;
+}
+
+.bd-article h1 {
+  padding-bottom: 0.6em;
+  border-bottom: 1px solid var(--pst-color-border);
+}
+
+.bd-article :is(h2, h3, h4) {
+  margin-top: 1.8em;
+  margin-bottom: 0.6em;
+}
+
+.bd-article :is(h3, h4) {
+  color: var(--pst-color-text-muted);
+}
+
+.bd-article :is(.sig, pre, code) {
+  font-size: 0.9em;
+}
+
+.bd-article .sig {
+  padding: 0.4em 0.6em;
+  border-left: 2px solid var(--pst-color-border);
+  background-color: var(--pst-color-surface);
+}
+
+.bd-article .sig:target {
+  border-left-color: var(--pst-color-primary);
+  background-color: var(--pst-color-target);
+}
+
+/* Code uses the classic VS Code light and dark palettes. */
+html[data-theme="light"] .highlight {
+  --code-background: #ffffff;
+  --code-text: #000000;
+  --code-name: #001080;
+  --code-keyword: #af00db;
+  --code-constant: #0000ff;
+  --code-string: #a31515;
+  --code-comment: #008000;
+  --code-number: #098658;
+  --code-function: #795e26;
+  --code-class: #267f99;
+}
+
+html[data-theme="dark"] .highlight {
+  --code-background: #1e1e1e;
+  --code-text: #d4d4d4;
+  --code-name: #9cdcfe;
+  --code-keyword: #c586c0;
+  --code-constant: #569cd6;
+  --code-string: #ce9178;
+  --code-comment: #6a9955;
+  --code-number: #b5cea8;
+  --code-function: #dcdcaa;
+  --code-class: #4ec9b0;
+}
+
+html[data-theme] .highlight,
+html[data-theme] .highlight pre {
+  color: var(--code-text);
+  background: var(--code-background);
+  box-shadow: none;
+}
+
+html[data-theme] .highlight pre {
+  line-height: 1.5;
+}
+
+html[data-theme] .highlight span[class] {
+  color: inherit;
+}
+
+html[data-theme] .highlight span:is(.n, .na, .nv) { color: var(--code-name); }
+html[data-theme] .highlight span:is(.k, .kn, .kd, .kp, .kr) { color: var(--code-keyword); }
+html[data-theme] .highlight span:is(.kc, .no, .ow, .bp) { color: var(--code-constant); }
+html[data-theme] .highlight span:is(.nb, .nf, .fm, .nd) { color: var(--code-function); }
+html[data-theme] .highlight span:is(.nc, .ne, .nn, .kt) { color: var(--code-class); }
+html[data-theme] .highlight span[class^="s"] { color: var(--code-string); }
+html[data-theme] .highlight span[class^="c"] { color: var(--code-comment); }
+html[data-theme] .highlight span:is(.m, .mb, .mf, .mh, .mi, .mo, .il) { color: var(--code-number); }
+
+.bd-article code.literal {
+  border: 0;
+  border-radius: 0.15em;
+}

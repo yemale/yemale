@@ -1,1 +1,2 @@
-include docs/*.md
+include docs/*.md docs/*.rst docs/conf.py
+include docs/_static/*.css

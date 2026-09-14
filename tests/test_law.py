@@ -110,6 +110,8 @@ def test_predictive_distribution_preserves_mass_support_and_inverse_jacobian(
         inverse=lambda z, labels: (z - shift(labels)) / 2,
         inverse_logabsdet=lambda z, labels: np.full_like(z, -np.log(2.0)),
     )
+    direct = ot.Law(transport.reference, forward=map_from_reference)
+    np.testing.assert_array_equal(direct.sample(8, rng=7), law.sample(8, rng=7))
     locate = ot.Reference.locate
     calls = []
 
@@ -145,10 +147,23 @@ def test_predictive_distribution_preserves_mass_support_and_inverse_jacobian(
         transport.predictive_distribution(map_from_reference).entropy()
 
 
+def test_distribution_constructors_require_callable_maps():
+    transport = ot.fit([[0.0]])
+    for name in ("forward", "backward"):
+        with pytest.raises(TypeError, match=name):
+            ot.Law(transport.reference, **{name: 0})
+    for name in ("map_from_reference", "inverse", "inverse_logabsdet"):
+        callbacks = {"map_from_reference": lambda points, labels: points, name: 0}
+        with pytest.raises(TypeError, match=name):
+            transport.predictive_distribution(**callbacks)
+    with pytest.raises(TypeError, match="map_from_reference"):
+        transport.predictive_distribution(None)
+
+
 def test_inverse_log_jacobians_compose_one_scalar_per_row():
     law = ot.Law(
         ot.reference(1, 1),
-        forward=lambda labels, u: 2 * u,
+        forward=lambda u, labels: 2 * u,
         backward=lambda z: (z / 2, np.full_like(z, -np.log(2))),
     )
     mapped = law._map(
@@ -158,6 +173,7 @@ def test_inverse_log_jacobians_compose_one_scalar_per_row():
     points = np.array([[-1.0], [0.0], [1.0]])
     np.testing.assert_allclose(np.exp(law.logpdf(points)), 0.25)
     np.testing.assert_allclose(np.exp(mapped.logpdf(points)), 1 / 12)
+    np.testing.assert_allclose(mapped.sample(8, rng=7), 3 * law.sample(8, rng=7))
     bad = law._map(lambda z: z, lambda z: (z, np.zeros(2)))
     with pytest.raises(ValueError, match="2 values for 3 points"):
         bad.logpdf(points)

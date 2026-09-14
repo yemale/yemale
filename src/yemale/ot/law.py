@@ -8,6 +8,7 @@ import numpy as np
 
 from yemale._array import count, readonly, restore, rows, scalars
 
+from .density import _density_region
 from .reference import Reference, _multi_index
 
 
@@ -17,6 +18,11 @@ class Law:
 
     Sampling chooses a cell using its weight, then draws from the reference
     distribution within that cell. An optional map transforms the samples.
+
+    Attributes:
+        reference: Reference distribution containing the selected cells.
+        cells: Distinct zero-based reference-cell labels.
+        weights: Cell probabilities, aligned with cells and summing to one.
     """
 
     reference: Reference
@@ -46,8 +52,8 @@ class Law:
             cells: Distinct integer labels in ``[0, reference.n]``. Defaults to all.
             weights: Nonnegative probabilities, one per selected cell, summing to one.
                 Defaults to equal weights over the selected cells.
-            forward: Optional ``forward(labels, points)`` taking ``(q,)`` labels
-                and ``(q, d)`` reference points. Returns mapped points ``(q, d)``.
+            forward: Optional ``forward(points, labels)`` taking ``(q, d)``
+                reference points and ``(q,)`` labels. Returns mapped points ``(q, d)``.
                 For density evaluation, it must be one-to-one across selected cells.
             backward: Optional ``backward(points)`` taking mapped points ``(q, d)``.
                 Returns reference points ``(q, d)`` and the inverse Jacobian's log
@@ -60,6 +66,10 @@ class Law:
         """
         if not isinstance(reference, Reference):
             raise TypeError("a Law requires a Reference")
+        if forward is not None and not callable(forward):
+            raise TypeError("forward must be callable as (points, labels)")
+        if backward is not None and not callable(backward):
+            raise TypeError("backward must be callable as (points)")
         selected = np.arange(reference.n + 1) if cells is None else np.atleast_1d(cells)
         if (
             selected.ndim != 1
@@ -107,7 +117,7 @@ class Law:
         if self._forward is None:
             return points
         mapped, _ = rows(
-            self._forward(labels, points), self.reference.dimension, "forward map"
+            self._forward(points, labels), self.reference.dimension, "forward map"
         )
         if len(mapped) != len(points) or not np.isfinite(mapped).all():
             raise ValueError(
@@ -138,9 +148,9 @@ class Law:
         return self._push(labels, self.reference._sample(labels, generator))
 
     def logpdf(self, value):
-        """Return log density at a point ``(d,)`` or batch ``(..., d)``.
+        """Return the natural logarithm of ``pdf(value)``.
 
-        Density is probability per unit volume, not the probability of a cell.
+        Accept a point ``(d,)`` or batch ``(..., d)``; return one value per point.
         A mapped law requires ``backward``; outside its support, return ``-inf``.
         """
         points, shape = rows(value, self.reference.dimension, "value")
@@ -181,17 +191,53 @@ class Law:
         return restore(result, shape)
 
     def pdf(self, value):
-        """Return the density at a point ``(d,)`` or batch ``(..., d)``."""
+        r"""Return density per unit volume, not the probability of a cell.
+
+        Accept ``(d,)`` or ``(..., d)``; return one value per point, zero outside
+        the support. For reference law nu, n = reference.n, cell weight w_j,
+        and inverse map q_j,
+
+        .. math::
+
+            p(x)=(n+1)w_j p_\nu(q_j(x))|\det Dq_j(x)|.
+
+        The formula holds almost everywhere on the image of cell j. Mapped laws
+        require ``backward`` and a differentiable map with nonsingular Jacobian,
+        one-to-one across selected cells. Without a map, q_j is the identity.
+        """
         return np.exp(self.logpdf(value))
 
+    def density_region(self, mass, *, n_integration_points=256):
+        r"""Select a density superlevel set with approximately the requested mass.
+
+        .. math:: A_t=\{x:p(x)\ge t\},\qquad \int_{A_t}p(x)\,dx\approx\mathrm{mass}.
+
+        ``mass`` is in (0, 1]. Include all ties at the cutoff; the returned
+        ``mass`` may therefore be larger. This is not a future-data coverage
+        guarantee. ``n_integration_points`` sets the points per selected cell;
+        the prepared density values are reused for subsequent mass requests.
+        Mapped laws require the inverse used by ``logpdf``.
+        """
+        return _density_region(
+            self, self.logpdf, self._integration_points, mass, n_integration_points
+        )
+
     def expect(self, function, *, n_integration_points=64, rng=None):
-        """Approximate ``E[function(X)]`` under this distribution.
+        r"""Approximate ``E[function(X)]`` under this distribution.
+
+        .. math::
+
+            \mathbb E[f(X)]
+            =\sum_j w_j\,\mathbb E_\nu[f(Q_j(U))\mid U\in L_j].
+
+        Here nu is the reference law, w_j the cell weight, and Q_j the forward
+        map in cell L_j (the identity when no map is supplied).
 
         ``function`` receives points ``(q, d)`` and returns values ``(q, ...)``.
         The result averages over points and keeps the remaining axes.
         ``n_integration_points`` is the number of points per selected cell.
-        ``rng=None`` uses fixed points; a seed or NumPy generator draws random
-        points independently within each cell.
+        ``rng=None`` uses fixed points (interval midpoints in 1-D, Halton points
+        otherwise). A seed or NumPy generator draws random points within each cell.
         """
         mapped, weights = self._integration_points(n_integration_points, rng)
         values = np.asarray(function(mapped))
@@ -203,10 +249,18 @@ class Law:
         return np.average(values, axis=0, weights=weights)
 
     def moment(self, powers, *, n_integration_points=64):
-        """Return the raw moment ``E[prod_j X[j] ** powers[j]]``.
+        r"""Return a raw moment, with one power per coordinate.
 
-        ``powers`` contains one nonnegative integer per coordinate. Reference-space
-        moments are exact. Mapped moments use numerical integration.
+        ``powers`` gives the nonnegative integers in alpha.
+        For example, ``moment((2, 0))`` means ``E[X[0]**2]``.
+
+        .. math::
+
+            \mathrm{moment}(\alpha)
+            =\mathbb E\!\left[\prod_{r=1}^d X_r^{\alpha_r}\right].
+
+        Reference-cell moments are exact. Mapped moments use fixed integration
+        points; ``n_integration_points`` sets their number per cell.
         """
         powers = _multi_index(powers, self.dimension)
         if self._forward is None:
@@ -218,7 +272,15 @@ class Law:
         )
 
     def mean(self, *, n_integration_points=64):
-        """Return ``E[X]`` as a vector; mapped laws use numerical integration."""
+        r"""Return the mean ``E[X]`` as a vector of length ``dimension``.
+
+        .. math::
+
+            \mathbb E[X]=(\mathbb E[X_1],\ldots,\mathbb E[X_d])^\top.
+
+        Reference-cell means are exact. Mapped means use fixed points;
+        ``n_integration_points`` sets their number per cell.
+        """
         if self._forward is None:
             return np.average(
                 self.reference.centers[self.cells], axis=0, weights=self.weights
@@ -227,9 +289,14 @@ class Law:
         return np.average(points, axis=0, weights=weights)
 
     def covariance(self, *, n_integration_points=64):
-        """Return ``E[(X - E[X]) (X - E[X]).T]`` as a square matrix.
+        r"""Return the covariance matrix, with shape ``(dimension, dimension)``.
 
-        Mapped laws use numerical integration.
+        .. math::
+
+            \mathrm{Cov}(X)=\mathbb E[(X-\mathbb E[X])(X-\mathbb E[X])^\top].
+
+        Reference-cell covariances are exact. Mapped covariances use fixed
+        integration points; ``n_integration_points`` sets their number per cell.
         """
         if self._forward is None:
             mean = self.mean()
@@ -248,9 +315,15 @@ class Law:
         return (centered * weights[:, None]).T @ centered
 
     def entropy(self, *, n_integration_points=64):
-        """Return differential entropy ``-E[log(pdf(X))]``, in nats.
+        r"""Return differential entropy ``-E[log(pdf(X))]``, in nats.
 
-        Mapped laws require an inverse and use numerical integration.
+        .. math::
+
+            h(X)=-\int p(x)\log p(x)\,dx.
+
+        Reference-cell mixtures use an exact formula, including the cell weights.
+        Mapped laws require ``backward`` and integrate ``-logpdf`` using
+        ``n_integration_points`` fixed points per cell.
         """
         if self._forward is not None:
             if self._backward is None:
@@ -274,7 +347,7 @@ class Law:
     def _map(self, forward, backward=None):
         """Apply ``forward`` after the existing map; combine their inverses for density."""
 
-        def mapped(labels, points):
+        def mapped(points, labels):
             return forward(self._push(labels, points))
 
         inverse = None

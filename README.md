@@ -1,9 +1,12 @@
 # yemale
 
-Multivariate ranks and quantile regions with candidate-augmented optimal transport.
+Candidate-augmented optimal transport for vector point clouds.
 
-Fit `n` observations once. Each query adds its candidate to an optimal assignment
+The default reference target also provides multivariate ranks and quantile regions.
+Fit `n` source points once. Each query adds its candidate to an optimal assignment
 of `n + 1` points, without solving a new assignment problem.
+
+[Documentation](https://yemale.github.io/)
 
 ## Install
 
@@ -19,8 +22,8 @@ python -m pip install "git+https://github.com/yemale/yemale.git@main"
 import numpy as np
 import yemale.ot as ot
 
-observations = np.random.default_rng(0).normal(size=(99, 2))
-T = ot.fit(observations)
+source = np.random.default_rng(0).normal(size=(99, 2))
+T = ot.fit(source)
 region = T.quantile_region(coverage=0.9)
 
 region.contains([[0.2, 0.4], [5.0, 5.0]])  # array([True, False])
@@ -38,11 +41,11 @@ The reference distribution has uniform radius and direction in the unit ball.
 ```python
 nu = T.reference
 nu.sample(size=1000, rng=0)
-nu.moment(powers=(2, 2))  # exact E[U_1^2 U_2^2]
+nu.mean()
 nu.covariance()
 ```
 
-To sample in the observed space, choose how probability fills each assigned cell.
+To sample in source space, choose how probability fills each assigned cell.
 The [predictive distribution example](docs/usage.md#predictive-distributions)
 shows that choice, sampling, and expectations in one runnable workflow.
 
