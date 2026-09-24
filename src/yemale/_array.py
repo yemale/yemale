@@ -5,7 +5,18 @@ from operator import index
 import numpy as np
 
 
+def batch(value, name):
+    """Interpret flat observation arrays as batches of scalar values."""
+    value = np.asarray(value)
+    if value.ndim == 1:
+        value = value[:, None]
+    if value.ndim != 2:
+        raise ValueError(f"{name} must have shape (n,) or (n, d); got {value.shape}")
+    return value
+
+
 def rows(value, dimension, name="point"):
+    """Return float64 rows (q, d) and batch shape; a single scalar has shape ()."""
     array = np.ascontiguousarray(value, dtype=np.float64)
     if dimension == 1 and array.ndim <= 1:
         shape = () if array.size == 1 else array.shape
@@ -29,6 +40,7 @@ def scalars(value, size, name):
 
 
 def restore(value, shape):
+    """Restore batch axes, preserving trailing value axes; unwrap scalar results."""
     result = value.reshape(shape + value.shape[1:])
     return result.item() if result.ndim == 0 else result
 

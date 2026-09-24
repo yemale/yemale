@@ -41,6 +41,13 @@ class Reference:
 
     @cached_property
     def _partition(self):
+        """For d = dimension, return (lower, upper, bounds), one row per cell.
+        lower/upper are length n + 1 radial bounds for d > 1; bounds has
+        shape (n + 1, d - 1, 2) in beta.py's probability coordinates.
+        For d = 1, endpoints are signed positions and bounds has no coordinates.
+        A k-cell shell gives each cell mass (k / (n + 1)) * (1 / k).
+        Radius and direction remain independent within each cell.
+        """
         if self.dimension == 1:
             edges = np.linspace(-1.0, 1.0, self.n + 2)
             return (
@@ -51,6 +58,10 @@ class Reference:
 
         shell_count = 1
         if self.n + 1 > self.dimension:
+            # The root sets radial resolution. The cap leaves at least d + 1
+            # directional cells per shell, so beta._child_counts can preserve
+            # full affine span in d dimensions. This is an exact-arithmetic
+            # geometric property, not a numerical conditioning guarantee.
             shell_count = min(
                 int(np.ceil((self.n + 1) ** (1.0 / self.dimension))),
                 (self.n + 1) // (self.dimension + 1),
@@ -193,11 +204,17 @@ class Reference:
                 unit = np.zeros_like(block)
                 unit[oriented] = block[oriented] / radius[oriented, None]
                 coordinates = beta.direction_cdf(unit)
+                # A probability coordinate is defined only while the remaining
+                # direction is nonzero. At an exact pole, ignore all subsequent
+                # bounds so argmax can choose the smallest touching cell.
+                defined = np.logical_or.accumulate(
+                    (unit != 0.0)[:, ::-1], axis=1
+                )[:, ::-1]
                 for level in range(self.dimension - 1):
                     band = (coordinates[:, level, None] >= bounds[:, level, 0]) & (
                         coordinates[:, level, None] <= bounds[:, level, 1]
                     )
-                    band[~oriented] = True
+                    band[~defined[:, level]] = True
                     within &= band
                 labels[start : start + len(block)] = np.where(
                     support & within.any(axis=1), within.argmax(axis=1), -1
@@ -284,7 +301,7 @@ class Reference:
         """
         return np.zeros(self.dimension)
 
-    def covariance(self):
+    def cov(self):
         r"""Return the covariance: identity divided by ``3 * dimension``.
 
         .. math::
@@ -373,6 +390,9 @@ def _cell_moments(reference, order):
 
 
 def _positive_power_integral(lower, upper, power):
+    """Return (upper**(power + 1) - lower**(power + 1)) / (power + 1).
+    Use expm1 to avoid cancellation between nearby nonnegative endpoint powers.
+    """
     value = np.zeros_like(lower)
     active = upper > lower
     if power == 0:
@@ -405,6 +425,11 @@ def _signed_uniform_moment(lower, upper, power):
 
 
 def _conditional_entropies(reference):
+    """Return cell entropies, with N = n + 1 and A the unit sphere's area.
+    For d > 1, h_j = log(A) - log(N) + (d - 1) * E[log(R) | L_j],
+    where R is uniform on the radial interval. Use its finite limit when
+    the lower endpoint is zero; in dimension one, h_j = log(2 / N).
+    """
     lower, upper, _ = reference._partition
     value = np.full(reference.n + 1, reference._log_area - math.log(reference.n + 1))
     if reference.dimension > 1:
@@ -429,6 +454,8 @@ def _quadrature(reference, labels, n_integration_points):
     else:
         from scipy.stats import qmc
 
+        # Skip the all-zero cube point: it lies on a cell corner and maps to
+        # the singular reference origin in the innermost shell.
         coordinates = qmc.Halton(reference.dimension, scramble=False).random(
             n_integration_points + 1
         )[1:]

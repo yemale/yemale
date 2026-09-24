@@ -1,4 +1,13 @@
-"""Construct cells on the sphere and compute their directional moments."""
+"""Construct spherical cells through independent uniform probability coordinates.
+For ambient m > 2, Theta_m = (T, sqrt(1 - T**2) * Theta_(m-1)), with
+(T + 1)/2 ~ Beta(a, a), a = (m - 1)/2, independent of uniform Theta_(m-1).
+For m = 2, use (cos(phi), sin(phi)), with phi uniform on [0, 2*pi).
+bounds/u_bounds bound d - 1 CDF coordinates, the last being phi/(2*pi);
+beta_bounds bound the corresponding (T + 1)/2 values at the first d - 2 levels.
+Box volumes are spherical probabilities; conditioning preserves independence.
+sphere_dimension and remaining mean ambient coordinate counts.
+Reference handles d = 1 separately.
+"""
 
 import numpy as np
 from scipy.special import betainc, betaincinv, betaln
@@ -12,20 +21,48 @@ def directional_barycentres(
     Without ``bounds``, split the unit cube into equal-volume boxes, then
     map them to cells on the sphere.
     """
-    u_bounds = _quantile_cells(dimension, cell_count) if bounds is None else bounds
+    u_bounds = bounds
+    if u_bounds is None:
+        u_bounds = _quantile_cells(dimension, cell_count)
     if beta_bounds is None:
         beta_bounds = _beta_quantile_bounds(dimension, u_bounds)
     barycentres = np.empty((cell_count, dimension))
-    for coordinate in range(dimension):
-        mean = _directional_mean(dimension, u_bounds, beta_bounds, coordinate)
-        barycentres[:, coordinate] = mean
+
+    # Product of the preceding E[sqrt(1 - T**2) | band] factors.
+    prefix_scale = np.ones(len(u_bounds))
+    for level in range(dimension - 2):
+        alpha, beta = _coordinate_beta_parameters(dimension - level)
+        lower, upper = beta_bounds[:, level].T
+        probability = u_bounds[:, level, 1] - u_bounds[:, level, 0]
+
+        moment = _beta_interval_moment(alpha, beta, 1.0, 0.0, lower, upper)
+        conditional_mean = moment / probability
+        barycentres[:, level] = prefix_scale * (2.0 * conditional_mean - 1.0)
+
+        moment = _beta_interval_moment(alpha, beta, 0.5, 0.5, lower, upper)
+        conditional_scale = moment / probability
+        prefix_scale *= 2.0 * conditional_scale
+
+    # The final two coordinates are cosine and sine of a uniform angle.
+    lower, upper = 2.0 * np.pi * u_bounds[:, dimension - 2].T
+    arc_width = upper - lower
+    cosine_integral = np.sin(upper) - np.sin(lower)
+    sine_integral = np.cos(lower) - np.cos(upper)
+
+    barycentres[:, -2] = prefix_scale * cosine_integral / arc_width
+    barycentres[:, -1] = prefix_scale * sine_integral / arc_width
     return barycentres
 
 
 def angular_moments(
     dimension: int, bounds: np.ndarray, order, *, beta_bounds=None
 ) -> np.ndarray:
-    """Return the requested directional moment within each cell."""
+    """Return E[product(Theta_r**order[r]) | cell] for each probability box.
+
+    At each level, every later coordinate contains the factor sqrt(1 - T**2).
+    Their combined exponent is sum(order[level + 1:]); independence in
+    probability coordinates lets these level contributions multiply.
+    """
     value = np.ones(len(bounds))
     if beta_bounds is None:
         beta_bounds = _beta_quantile_bounds(dimension, bounds)
@@ -66,37 +103,6 @@ def _beta_quantile_bounds(dimension: int, u_bounds: np.ndarray) -> np.ndarray:
     return beta_bounds
 
 
-def _directional_mean(
-    dimension: int,
-    u_bounds: np.ndarray,
-    beta_bounds: np.ndarray,
-    coordinate: int,
-) -> np.ndarray:
-    """Return one coordinate of the mean direction in every spherical cell."""
-    mean = np.ones(len(u_bounds))
-    for level in range(coordinate + 1):
-        sphere_dimension = dimension - level
-        if sphere_dimension == 2:
-            # In two dimensions, average cosine and sine over the angle interval.
-            lower, upper = 2.0 * np.pi * u_bounds[:, level].T
-            if coordinate == level:
-                return mean * (np.sin(upper) - np.sin(lower)) / (upper - lower)
-            return mean * (np.cos(lower) - np.cos(upper)) / (upper - lower)
-
-        alpha, beta = _coordinate_beta_parameters(sphere_dimension)
-        lower, upper = beta_bounds[:, level].T
-        probability = u_bounds[:, level, 1] - u_bounds[:, level, 0]
-        if coordinate == level:
-            moment = _beta_interval_moment(alpha, beta, 1.0, 0.0, lower, upper)
-            conditional_mean = moment / probability
-            return mean * (2.0 * conditional_mean - 1.0)
-
-        moment = _beta_interval_moment(alpha, beta, 0.5, 0.5, lower, upper)
-        conditional_scale = moment / probability
-        mean *= 2.0 * conditional_scale
-    return mean
-
-
 def _fill_quantile_cells(
     sphere_dimension: int,
     cell_count: int,
@@ -123,7 +129,13 @@ def _fill_quantile_cells(
 
 
 def _child_counts(sphere_dimension: int, cell_count: int) -> tuple[int, ...]:
-    """Return how many cells to place in each band of the first coordinate."""
+    """Allocate bands with an exact-arithmetic affine-span invariant.
+    For m = sphere_dimension and cell_count > m, keep at least two nonempty
+    bands and a child with at least m cells. Its means affinely span the
+    remaining m - 1 coordinates; another band supplies the final dimension.
+    The induction starts with at least three noncollinear circular-arc means.
+    The root count sets resolution; no numerical conditioning bound is claimed.
+    """
     if cell_count <= 1:
         return (cell_count,)
 
@@ -163,7 +175,11 @@ def _beta_interval_moment(
 
 
 def _head_moment(remaining, power, tail_power, lower, upper, mass):
-    """Average ``t**power * (1 - t**2)**(tail_power / 2)`` over a coordinate interval."""
+    """Average T**power * (1 - T**2)**(tail_power / 2) on [lower, upper].
+    T is a uniform-sphere coordinate in ambient dimension remaining.
+    mass is the whole interval's probability under that marginal;
+    both signed partial integrals use this same denominator.
+    """
     value = np.zeros(len(lower))
     negative = lower < 0.0
     if np.any(negative):
@@ -213,6 +229,13 @@ def _positive_head_moment(remaining, power, tail_power, lower, upper, mass):
 
 
 def _arc_moment(cosine_power, sine_power, bounds):
+    """Average cos(theta)**cosine_power * sin(theta)**sine_power on each arc.
+    bounds are turn fractions; divide the integral by 2*pi*(upper - lower).
+    Translate each quadrant to phi in [0, pi/2], restore its signs, and swap
+    powers in odd quadrants. For local sine/cosine powers s,c, x = sin(phi)**2
+    gives half an incomplete Beta integral with parameters (s + 1)/2, (c + 1)/2.
+    Separate complements and exact quadrant endpoints preserve tail accuracy.
+    """
     lower, upper = bounds.T
     width = 2.0 * np.pi * (upper - lower)
     value = np.zeros(len(bounds))

@@ -1,5 +1,6 @@
 """Candidate-augmented transport and predictive distributions."""
 
-from . import ot
+from . import conformal, ot
+from .conformal import conformalize, extend
 
-__all__ = ["ot"]
+__all__ = ["conformal", "conformalize", "extend", "ot"]

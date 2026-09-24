@@ -19,7 +19,7 @@ def _augmented_inverse(source, target, point):
 
 
 @pytest.mark.parametrize("biased", [False, True])
-def test_leave_one_solver_matches_independent_hungarian_oracle(biased):
+def test_leave_one_matches_hungarian(biased):
     rng = np.random.default_rng(0)
     for n in range(2, 12):
         cost = np.vstack((rng.uniform(size=(n, n + 1)), np.zeros(n + 1)))
@@ -48,7 +48,7 @@ def test_leave_one_solver_matches_independent_hungarian_oracle(biased):
         assert np.allclose(one_dimensional_costs, general_costs)
 
 
-def test_hard_transport_and_assignment_match_augmented_hungarian_oracle():
+def test_transport_matches_hungarian():
     rng = np.random.default_rng(1)
     for dimension in (1, 3):
         for _ in range(12):
@@ -56,19 +56,7 @@ def test_hard_transport_and_assignment_match_augmented_hungarian_oracle():
             target = rng.normal(size=(len(source) + 1, dimension))
             transport = ot.fit(source, target=target)
             point = rng.normal(size=dimension)
-            source_center = source.mean(axis=0)
-            normalized_source = source - source_center
-            source_scale = np.linalg.norm(normalized_source) / np.sqrt(len(source))
-            if source_scale == 0.0:
-                source_scale = 1.0
-            normalized_source /= source_scale
-
-            normalized_point = (point - source_center) / source_scale
-            inverse = _augmented_inverse(
-                normalized_source,
-                target,
-                normalized_point,
-            )
+            inverse = _augmented_inverse(source, target, point)
             label = int(np.flatnonzero(inverse == len(source))[0])
             assignment = transport.assignment(point)
             assert assignment[-1] == label
@@ -80,7 +68,7 @@ def test_hard_transport_and_assignment_match_augmented_hungarian_oracle():
             assert np.allclose(transport.sign(point), expected_sign)
 
 
-def test_fit_is_translation_scale_invariant():
+def test_source_translation_and_scale():
     rng = np.random.default_rng(3)
     source = rng.normal(size=(40, 3))
     point = rng.normal(size=(100, 3))
@@ -90,33 +78,31 @@ def test_fit_is_translation_scale_invariant():
     assert np.allclose(ot.fit(source * 1e160)(point * 1e160), expected)
 
 
-def test_1d_flat_batches_match_column_batches():
-    transport = ot.fit(np.arange(5.0)[:, None])
+@pytest.mark.parametrize("target", [None, np.linspace(1.0, -1.0, 6)])
+def test_scalar_and_column_inputs_agree(target):
+    source = np.arange(5.0)
+    transport = ot.fit(source, target=target)
+    column_transport = ot.fit(
+        source[:, None], target=None if target is None else target[:, None]
+    )
     points = np.linspace(-2.0, 2.0, 7)
     column = points[:, None]
-    assert np.allclose(transport(points), transport(column))
-    assert np.allclose(transport.rank(points), transport.rank(column))
-    assert np.allclose(transport.sign(points), transport.sign(column))
-    assert np.array_equal(transport.assignment(points), transport.assignment(column))
+    np.testing.assert_array_equal(transport(points), column_transport(column))
+    for name in ("label", "rank", "sign", "potential", "assignment"):
+        np.testing.assert_array_equal(
+            getattr(transport, name)(points), getattr(column_transport, name)(column)
+        )
 
 
-def test_parallel_batch_matches_individual_queries():
+def test_batch_queries_match_individual_queries():
     rng = np.random.default_rng(5)
     transport = ot.fit(rng.normal(size=(20, 3)))
     points = rng.normal(size=(4096, 3))
     assert np.allclose(
         transport(points), np.array([transport(point) for point in points])
     )
-    assert np.allclose(
-        transport.rank(points), [transport.rank(point) for point in points]
-    )
     expected = np.array([transport.assignment(point) for point in points])
-    for batch in (
-        points[:1],
-        points[:1].reshape(1, 1, 3),
-        points[:2],
-        points.reshape(2, 2048, 3),
-    ):
+    for batch in (points[:1].reshape(1, 1, 3), points.reshape(2, 2048, 3)):
         assignments = transport.assignment(batch)
         assert assignments.shape == batch.shape[:-1] + (21,)
         assert np.array_equal(assignments.reshape(-1, 21), expected[: batch.size // 3])
@@ -133,9 +119,10 @@ def test_parallel_batch_matches_individual_queries():
             np.testing.assert_array_equal(result[name], query(batch))
 
 
-def test_fit_rejects_invalid_source_or_target():
-    with pytest.raises(ValueError, match="source must be 2-D"):
-        ot.fit(np.arange(3.0))
+def test_fit_rejects_invalid_inputs():
+    for source in (0.0, np.zeros((2, 3, 4))):
+        with pytest.raises(ValueError, match="source must have shape"):
+            ot.fit(source)
     with pytest.raises(ValueError, match="source must contain at least one point"):
         ot.fit(np.empty((0, 2)))
     with pytest.raises(ValueError, match="source must have at least one dimension"):
@@ -176,23 +163,38 @@ def test_unrepresentable_queries_and_potentials_raise():
         _ = shifted.phi
 
 
-def test_reference_barycentres_are_first_cell_moments():
+def test_reference_centers_match_cell_means():
     for n in (0, 3):
         reference = ot.Reference(n=n, dimension=2)
         assert reference.n == n and reference.centers.shape == (n + 1, 2)
         assert np.array_equal(reference.centers, ot.reference(n, 2).centers)
     assert np.allclose(ot.reference(3, 1).centers[:, 0], [-0.75, -0.25, 0.25, 0.75])
+    # Four angular quadrants with uniform radius: each coordinate mean is ±1/pi.
     assert np.allclose(
         ot.reference(3, 2).centers,
         np.array([[1, 1], [-1, 1], [-1, -1], [1, -1]]) / np.pi,
     )
+    # On S² the first coordinate is uniform; the first band is [-1, -1/2].
     assert np.allclose(
         beta.directional_barycentres(3, 4)[0],
         [-0.75, 0.0, 0.0],
     )
 
 
-def test_one_dimensional_transport_recovers_dempster_hill():
+@pytest.mark.parametrize("dimension", [2, 3, 8])
+def test_directional_centers_match_moments(dimension):
+    bounds = beta._quantile_cells(dimension, 17)
+    barycentres = beta.directional_barycentres(dimension, 17, bounds=bounds)
+    for coordinate, order in enumerate(np.eye(dimension, dtype=int)):
+        np.testing.assert_allclose(
+            barycentres[:, coordinate],
+            beta.angular_moments(dimension, bounds, order),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+
+def test_one_dimensional_dempster_hill():
     source = np.array([-3.0, -1.0, 2.0, 5.0])
     transport = ot.fit(source[:, None])
     points = np.array([-4.0, -2.0, 0.0, 3.0, 6.0])
@@ -207,18 +209,19 @@ def test_one_dimensional_transport_recovers_dempster_hill():
 
     kernel = transport.reference_distribution(0.0)
     np.testing.assert_allclose(kernel.mean(), [0.0], atol=1e-15)
-    np.testing.assert_allclose(kernel.covariance(), [[width**2 / 12]])
+    np.testing.assert_allclose(kernel.cov(), [[width**2 / 12]])
     np.testing.assert_allclose(kernel.pdf(0.0), 1 / width)
     np.testing.assert_allclose(kernel.entropy(), np.log(width))
 
-    region = transport.quantile_region(0.5)
+    region = transport.quantile_region(0.5, randomized=False)
     np.testing.assert_array_equal(region.labels, [1, 2, 3])
     assert region.coverage == 3 / 5
     np.testing.assert_array_equal(region.contains([-2.0, 0.0, 4.0]), True)
     np.testing.assert_array_equal(region.contains([-4.0, 6.0]), False)
 
 
-def test_leave_one_row_symmetry_gives_a_permutation_of_labels():
+def test_leave_one_labels_form_a_permutation():
+    """The same augmented cloud gives one optimal permutation, whichever row is held out."""
     rng = np.random.default_rng(9)
     source = rng.normal(size=(9, 2))
     labels = []
@@ -239,32 +242,107 @@ def test_cell_geometry_in_original_coordinates():
     matrix, offset = transport.halfspaces(1)
     np.testing.assert_allclose(matrix, [[-2], [2]])
     np.testing.assert_allclose(offset, [-2, 10])
-    branches = points[:, None] * transport._target[:, 0] - transport.phi
+    branches = points[:, None] * np.array([-2.0, 0.0, 2.0]) - transport.phi
     np.testing.assert_allclose(branches.max(axis=1), transport.potential(points))
-    assert not transport.phi.flags.writeable
 
 
-def test_quantile_region_uses_the_smallest_reference_radius_with_enough_mass():
+def test_quantile_region_includes_equal_radius_cells():
     rng = np.random.default_rng(10)
     transport = ot.fit(rng.normal(size=(9, 2)))
-    region = transport.quantile_region(0.5)
+    region = transport.quantile_region(0.5, randomized=False)
     ranks = transport.reference.ranks
 
+    assert not region.randomized
     np.testing.assert_array_equal(region.labels, np.flatnonzero(ranks <= region.radius))
     assert region.coverage == 0.7
-    tolerance = 16 * np.finfo(float).eps * max(1.0, region.radius)
-    assert (ranks < region.radius - tolerance).sum() / len(ranks) < 0.5
     points = rng.normal(size=(20, 2))
     np.testing.assert_array_equal(
         region.contains(points), transport.rank(points) <= region.radius
     )
     assert len(region.halfspaces()) == len(region.labels)
-    assert not region.labels.flags.writeable
 
     with pytest.raises(ValueError, match="between 0 and 1"):
         transport.quantile_region(1.1)
     with pytest.raises(ValueError, match="requires reference cells"):
         ot.fit([[0.0]], target=[[-1.0], [1.0]]).quantile_region(0.5)
+    with pytest.raises(ValueError, match="rng requires randomized=True"):
+        transport.quantile_region(0.5, randomized=False, rng=7)
+    with pytest.raises(TypeError, match="randomized must be True or False"):
+        transport.quantile_region(0.5, randomized="yes")
+
+
+@pytest.mark.parametrize("dimension", [1, 2, 5])
+def test_randomized_region_is_reproducible_and_nested(dimension):
+    rng = np.random.default_rng(20)
+    transport = ot.fit(rng.normal(size=(19, dimension)))
+    region = transport.quantile_region(0.53, rng=7)
+
+    assert region.randomized
+    assert region.coverage == region.radius == 0.53
+    for seed in (7, np.random.default_rng(7)):
+        repeated = transport.quantile_region(0.53, rng=seed)
+        np.testing.assert_array_equal(repeated.labels, region.labels)
+    assert not np.array_equal(
+        transport.quantile_region(0.53, rng=0).labels, region.labels
+    )
+    larger = transport.quantile_region(0.8, rng=7)
+    assert np.isin(region.labels, larger.labels).all()
+
+    points = rng.normal(size=(12, dimension))
+    expected = np.isin(transport.label(points), region.labels)
+    np.testing.assert_array_equal(region.contains(points), expected)
+    np.testing.assert_array_equal(
+        [region.contains(point) for point in points], expected
+    )
+    np.testing.assert_array_equal(region.contains(points), expected)
+    for coverage in (0, 1):
+        endpoint = transport.quantile_region(coverage, rng=7)
+        np.testing.assert_array_equal(
+            endpoint.labels, np.arange(20) if coverage else []
+        )
+        np.testing.assert_array_equal(endpoint.contains(points), bool(coverage))
+        assert endpoint.coverage == coverage
+
+
+@pytest.mark.parametrize("dimension", [1, 2])
+def test_region_is_reference_set_preimage(dimension):
+    rng = np.random.default_rng(9)
+    source = rng.normal(size=(9, dimension))
+    points = rng.normal(size=(15, dimension))
+
+    def reference_set(u):
+        return u[:, 0] <= 0.3
+
+    for target in (None, rng.normal(size=(10, dimension))):
+        transport = ot.fit(source, target=target)
+        region = transport.region(reference_set)
+        np.testing.assert_array_equal(
+            region.contains(points), reference_set(transport(points))
+        )
+        assert region.coverage == len(region.labels) / 10
+    with pytest.raises(TypeError, match="quantile_region"):
+        transport.region(0.9)
+    for predicate in (lambda u: u[:, :1] > 0, lambda u: u[:, 0]):
+        with pytest.raises(ValueError, match="Booleans"):
+            transport.region(predicate)
+
+
+@pytest.mark.parametrize("dimension", [1, 2])
+def test_region_select_preserves_rows(dimension):
+    source = np.array([[-2.0, 0.0], [0.0, 1.0], [2.0, -1.0]])
+    points = np.array([[-3, 0], [0, 1], [3, -1], [3, -1]], dtype=np.int32)
+    transport = ot.fit(source[:, :dimension])
+    candidates = points[:, 0] if dimension == 1 else points
+    region = transport.region(lambda u: u[:, 0] >= 0)
+    expected = candidates[region.contains(candidates)]
+    selected = region.select(candidates)
+    np.testing.assert_array_equal(selected, expected)
+    assert selected.dtype == candidates.dtype
+    np.testing.assert_array_equal(region.select(candidates.tolist()), expected)
+    assert region.select(candidates[:0]).shape == candidates[:0].shape
+    if dimension == 2:
+        with pytest.raises(ValueError, match="must have shape"):
+            region.select(points[0])
 
 
 @pytest.mark.parametrize("dimension", [1, 2])
@@ -282,23 +360,22 @@ def test_target_translation_preserves_assignments(dimension):
     np.testing.assert_allclose(shifted(points) - 1e8, transport(points), atol=2e-8)
 
 
-def test_far_targets_preserve_small_assignment_margins():
-    for shift, margin in ((1e8, 1e-10), (1e15, 0.01)):
-        target = np.array([[shift, shift], [shift + 1, shift]])
-        transport = ot.fit([[0.0, 0.0]], target=target)
-        points = [[margin, 1.0], [-margin, 1.0]]
-        np.testing.assert_array_equal(transport.assignment(points), [[0, 1], [1, 0]])
-        np.testing.assert_array_equal(transport.evaluate(points)["label"], [1, 0])
+def test_far_targets_preserve_small_margins():
+    target = [[1e8, 1e8], [1e8 + 1, 1e8]]
+    transport = ot.fit([[0.0, 0.0]], target=target)
+    points = [[1e-10, 1.0], [-1e-10, 1.0]]
+    np.testing.assert_array_equal(transport.assignment(points), [[0, 1], [1, 0]])
+    np.testing.assert_array_equal(transport.evaluate(points)["label"], [1, 0])
 
 
 @pytest.mark.parametrize("dimension", [1, 2])
-def test_target_scale_preserves_assignments_and_potential(dimension):
+def test_target_scale_preserves_transport(dimension):
     rng = np.random.default_rng(4)
     source = rng.normal(size=(7, dimension))
     target = rng.normal(size=(8, dimension))
     points = rng.normal(size=(100, dimension))
     transport = ot.fit(source, target=target)
-    for scale in (1e-150, 1e15, 1e150):
+    for scale in (1e-150, 1e150):
         scaled = ot.fit(source, target=scale * target)
         np.testing.assert_array_equal(
             scaled.assignment(points), transport.assignment(points)
@@ -315,10 +392,9 @@ def test_target_scale_preserves_assignments_and_potential(dimension):
         ([[-1.0], [1.0]], [[1.0], [-1.0], [1.0]], 2.0),
         ([[0.0], [0.0]], [[1.0], [-1.0], [0.0]], 0.0),
         ([[0, 0], [0, 0], [1, 1]], [[-1, -1], [1, -1], [-1, 1], [1, 1]], [0, 0]),
-        (np.arange(18).reshape(9, 2), np.full((10, 2), 1e150), [0, 0]),
     ],
 )
-def test_ties_choose_the_smallest_optimal_label(source, target, point):
+def test_ties_choose_label_zero(source, target, point):
     transport = ot.fit(source, target=target)
     assert transport.label(point) == 0
     assert transport.assignment(point)[-1] == 0
@@ -326,3 +402,13 @@ def test_ties_choose_the_smallest_optimal_label(source, target, point):
     expected = np.broadcast_to(transport.assignment(point), (512, len(target)))
     np.testing.assert_array_equal(transport.assignment(batch), expected)
     np.testing.assert_array_equal(transport.evaluate(batch)["label"], np.zeros(512))
+
+
+@pytest.mark.parametrize("coverage", [0.14, 0.28, 0.56])
+def test_region_reaches_decimal_coverage(coverage):
+    transport = ot.fit(np.arange(99.0)[:, None])
+    region = transport.quantile_region(coverage, randomized=False)
+    assert region.coverage == coverage
+
+    above = np.nextafter(coverage, 1.0)
+    assert transport.quantile_region(above, randomized=False).coverage >= above

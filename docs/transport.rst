@@ -1,9 +1,8 @@
 Transport
 =========
 
-With the default target, ``T.reference`` is the Reference distribution used by
-the fit. An array supplied through ``target=`` instead gives arbitrary-target
-transport without reference-law or quantile-region features.
+``transport = ot.fit(source)`` returns a :class:`~yemale.ot.Transport`.
+Call ``transport(points)`` to map points to target coordinates.
 
 .. autofunction:: yemale.ot.fit
 

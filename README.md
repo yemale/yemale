@@ -1,12 +1,12 @@
 # yemale
 
-Candidate-augmented optimal transport for vector point clouds.
+Add predictive regions and distribution summaries to your model, keeping its
+point predictions and ordinary methods.
 
-The default reference target also provides multivariate ranks and quantile regions.
-Fit `n` source points once. Each query adds its candidate to an optimal assignment
-of `n + 1` points, without solving a new assignment problem.
-
-[Documentation](https://yemale.github.io/)
+yemale uses center-outward ranks from optimal transport for multivariate
+conformal prediction. Work with predictions and observed outcomes, or connect
+your fitted model with `extend`. The independent optimal-transport engine also
+works directly on point clouds.
 
 ## Install
 
@@ -16,40 +16,38 @@ Requires Python 3.10–3.14.
 python -m pip install "git+https://github.com/yemale/yemale.git@main"
 ```
 
-## Quantile regions
+## With your model
+
+Start with a fitted model and calibration data `X_cal, y_cal` that were not
+used to train it.
 
 ```python
-import numpy as np
-import yemale.ot as ot
+from yemale import extend
 
-source = np.random.default_rng(0).normal(size=(99, 2))
-T = ot.fit(source)
-region = T.quantile_region(coverage=0.9)
+model = extend(model)
+model.conformalize(X_cal, y_cal)
 
-region.contains([[0.2, 0.4], [5.0, 5.0]])  # array([True, False])
-region.coverage                            # 0.9
+cpd = model.predict_distribution(X_new)
+region = cpd.region(0.9)
+region.contains(y_new)  # One Boolean per new outcome.
 ```
 
-Queries accept one point or a batch. `region.coverage` gives the achieved level,
-which can exceed the request when whole cells are included together.
-See the [guide](docs/usage.md#quantile-regions) for coverage assumptions.
+`model.predict(X_new)` still returns the original point predictions.
+The default score is the residual, `outcomes - predictions`. Regions have
+marginal coverage under the [score assumptions](docs/conformal.md#coverage).
+For sampling and summaries,
+[choose a predictive law](docs/conformal.md#predictive-laws).
 
-## Distributions
+Already have predictions? Use `yemale.conformalize(predictions, outcomes)`
+directly; `extend` only connects this operation to your model.
 
-The reference distribution has uniform radius and direction in the unit ball.
+## Explore
 
-```python
-nu = T.reference
-nu.sample(size=1000, rng=0)
-nu.mean()
-nu.covariance()
-```
-
-To sample in source space, choose how probability fills each assigned cell.
-The [predictive distribution example](docs/usage.md#predictive-distributions)
-shows that choice, sampling, and expectations in one runnable workflow.
-
-The [guide](docs/usage.md) also covers ranks, assignments, potentials, and smoothing.
+- [Conformal prediction](src/yemale/conformal/README.md): use a model or prediction
+  arrays, test outcomes, and select candidates.
+- [Optimal transport](src/yemale/ot/README.md): fit point clouds, construct regions,
+  and work with reference and predictive distributions.
+- [Mathematical guide](docs/usage.md): the construction and its connection to the API.
 
 ## License
 

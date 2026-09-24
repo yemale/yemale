@@ -1,9 +1,8 @@
-# Concepts and usage
+# Mathematical guide
 
 The transport assigns candidates to reference cells. A predictive distribution
 also specifies how probability fills the corresponding cells in source space.
-This guide connects the construction, formulas, and API. Each API entry links to
-the implementation used to produce it.
+This guide connects the construction and formulas to the API.
 
 - [Reference distribution](#reference-distribution)
 - [Candidate-augmented transport](#candidate-augmented-transport)
@@ -18,30 +17,33 @@ the implementation used to produce it.
 Examples run in order. Mathematical cell indices run from $1$ to $n+1$;
 Python labels run from `0` to `n`.
 
-`ot.fit(source)` uses the default reference target. It enables the reference
-law, ranks, signs, and quantile regions. `ot.fit(source, target=array)` instead
-provides arbitrary-target transport, assignments, and smoothing.
+`ot.fit(source)` uses the default reference target, including its reference
+law and quantile regions. `ot.fit(source, target=array)` retains the supplied
+coordinates for transport, assignments, and smoothing. Rank and sign still
+give each assigned target's radius and direction, but an array supplies no
+reference-cell distribution.
 
 | Symbol | Meaning | API |
 | --- | --- | --- |
 | $\nu$ | Default reference distribution | {py:class}`yemale.ot.Reference` |
 | $L_j$ | Equal-probability reference cell | {py:meth}`yemale.ot.Reference.locate` |
-| $m_j$ | Reference-cell centre | {py:attr}`yemale.ot.Reference.centers` |
+| $m_j$ | Reference-cell center | {py:attr}`yemale.ot.Reference.centers` |
 | $k(z)$ | Label assigned to candidate $z$ | {py:meth}`yemale.ot.Transport.label` |
-| $T(z)$ | Centre assigned to candidate $z$ | {py:class}`yemale.ot.Transport` |
+| $T(z)$ | Center assigned to candidate $z$ | {py:class}`yemale.ot.Transport` |
 
 ## Reference distribution
 
 Let $Z_1,\ldots,Z_n\in\mathbb R^d$ be the source points. The default target law
-$\nu$ has independent uniform radius and direction on the unit ball $\mathcal U$,
-not uniform volume. Independently of the source points, partition it into cells:
+$\nu$ on the unit ball $\mathcal U$ has radius uniform on $[0,1]$ and an
+independent uniform direction. Independently of the source points, partition
+the ball into cells:
 
 ```math
 \mathcal U=\bigsqcup_{j=1}^{n+1}L_j,\qquad
 \nu(L_j)=\frac1{n+1}.
 ```
 
-Write $U\sim\nu$ and $\nu_j=\nu(\,\cdot\mid L_j)$. The full law and cell centres are
+Write $U\sim\nu$ and $\nu_j=\nu(\,\cdot\mid L_j)$. The full law and cell centers are
 
 ```math
 \nu=\frac1{n+1}\sum_{j=1}^{n+1}\nu_j,
@@ -61,8 +63,7 @@ nu.centers     # m_j, one row per reference cell
 nu.dimension   # number of coordinates per point
 ```
 
-`nu` is continuous. The assignment uses its `n + 1` cell centres, not a random
-sample from it.
+`nu` is continuous. Its `n + 1` cell centers are the fixed assignment targets.
 
 ## Candidate-augmented transport
 
@@ -77,8 +78,10 @@ k(z)=\sigma_z(n+1),\qquad T(z)=m_{k(z)},\qquad
 V_j^\dagger=\{z:k(z)=j\}.
 ```
 
-Ties choose the smallest optimal label. Thus the assigned cells partition source
-space. Each query has its own augmented assignment; it does not modify the fit.
+On shared boundaries, `T.label` assigns each point to one cell, choosing the
+smallest label for exactly equal computed scores. The assigned cells therefore
+partition source space. Each query has its own augmented assignment and reuses
+the fitted transport.
 
 ### One fit for every candidate
 
@@ -97,9 +100,7 @@ Equivalently,
 T(z)\in\partial\Phi(z).
 ```
 
-In multiple dimensions, `fit` obtains all leave-one costs from one assignment
-with a zero-cost auxiliary row and a shortest-path pass. In one dimension it
-uses sorting. The auxiliary row is a computational device, not the candidate.
+One fit computes all leave-one costs; later candidates reuse them.
 `T.phi` fixes a common additive constant; this does not affect labels or derivatives.
 
 ```python
@@ -122,14 +123,14 @@ owns a boundary point.
 
 ## Quantile regions
 
-Under exchangeability, no ties, and almost-sure uniqueness of the augmented
-optimal assignment,
+If the source points and next candidate are exchangeable and the augmented
+optimal assignment is almost surely unique,
 
 ```math
 k(Z_{n+1})\sim\mathrm{Uniform}\{1,\ldots,n+1\}.
 ```
 
-For a radius $r$, define
+For a deterministic center-radius region with radius $r$, define
 
 ```math
 J_r=\{j:\|m_j\|\leq r\},\qquad
@@ -139,7 +140,7 @@ J_r=\{j:\|m_j\|\leq r\},\qquad
 
 Its marginal coverage is $|J_r|/(n+1)$. This averages over the source points and
 the next candidate; it is not a conditional guarantee for every fitted dataset.
-For requested coverage $1-\alpha$, choose
+For requested coverage $1-\alpha$, the deterministic rule chooses
 
 ```math
 r_{\alpha,n+1}
@@ -147,16 +148,44 @@ r_{\alpha,n+1}
 ```
 
 ```python
-region = T.quantile_region(coverage=0.9)
+deterministic = T.quantile_region(coverage=0.9, randomized=False)
+```
+
+Cells whose centers have the same radius enter together, so deterministic
+coverage can exceed the request. `deterministic.radius` is the center-radius
+cutoff and `deterministic.coverage` is the achieved level.
+
+By default, `quantile_region` instead draws one independent point from each
+reference cell, independently of the data. For requested coverage $c$, it returns
+
+```math
+W_j\sim\nu(\,\cdot\mid L_j),\qquad
+\bigcup_{j:\|W_j\|\leq c}V_j^\dagger.
+```
+
+The reference radius is uniform on $[0,1]$, so this region has marginal coverage
+$c$, averaging over the source points, the next candidate, and these draws.
+It is not a conditional guarantee for a fitted dataset or a realized set of
+draws. The selected cells are frozen when the region is constructed: repeated
+membership queries, `labels`, and `halfspaces()` use the same selection.
+
+```python
+region = T.quantile_region(coverage=0.9, rng=0)
 region.contains([[0.2, 0.4], [5.0, 5.0]])  # array([True, False])
+region.select([[0.2, 0.4], [5.0, 5.0]])    # array([[0.2, 0.4]])
 region.coverage                            # 0.9
-region.radius
+region.radius                              # 0.9
 region.labels
 region.halfspaces()  # one (A, b) pair per closed cell
 ```
 
-The argument is coverage, not radius. Cells at the same radius enter together,
-so achieved coverage can exceed the request.
+Pass an integer seed or a NumPy `Generator` as `rng` to control the draws.
+Reusing the same integer seed gives nested regions as coverage increases;
+separate unseeded constructions need not be nested.
+For randomized regions, `region.radius` is the reference-ball radius $c$ and
+`region.coverage` is the requested marginal level; the realized fraction
+`len(region.labels) / (nu.n + 1)` can differ. This selection uses the sampled
+points $W_j$, so it need not equal the deterministic region $\Omega_r$.
 
 ### Rank and depth
 
@@ -170,7 +199,7 @@ depth = 1 - T.rank(z)
 
 ### Median set
 
-The convex potential defines the set
+As an advanced geometric summary, the convex potential defines the median set
 
 ```math
 \mathcal M=\arg\min_{z}\Phi(z)=\partial\Phi^*(0),
@@ -178,11 +207,11 @@ The convex potential defines the set
 \Phi^*(u)=\sup_z\{\langle u,z\rangle-\Phi(z)\}.
 ```
 
-This uses the whole subgradient, not just the branch selected by `T`. In
-particular, `T.quantile_region(0)` can be empty even when $\mathcal M$ is not.
+This definition uses the whole subgradient. In particular, $\mathcal M$ can
+remain nonempty when `T.quantile_region(0)` is empty.
 
-There is no median method. With the default reference, a linear program gives
-one median point and the inequalities describing the whole set:
+With the default reference, the following linear program computes one median
+point and the inequalities describing the whole set:
 
 ```math
 \begin{aligned}
@@ -208,22 +237,13 @@ median_A, median_b = nu.centers, T.phi + result.fun
 
 ## Predictive distributions
 
-First, obtain the reference law within the candidate's assigned cell.
-
-```python
-cell = T.reference_distribution(z)
-cell.sample(1000, rng=0)  # reference points in L_{k(z)}
-```
-
-Under the calibration assumptions above, $W_z\sim\nu_{k(z)}$ gives
-$W_{Z_{n+1}}\sim\nu$ marginally. These samples are reference coordinates,
-not future observations.
-
-When all assigned cells are nonempty, choose a law within each cell:
+To obtain a distribution in source coordinates, specify how probability fills
+the assigned source cells. When all assigned cells are nonempty, choose a law
+within each cell:
 
 ```math
 \lambda_j(V_j^\dagger)=1,\qquad
-\Pi^Z=\frac1{n+1}\sum_{j=1}^{n+1}\lambda_j.
+\Pi=\frac1{n+1}\sum_{j=1}^{n+1}\lambda_j.
 ```
 
 The package specifies these laws through measurable maps
@@ -236,21 +256,23 @@ k(Q_j(u))=j\quad\text{for }\nu_j\text{-almost every }u.
 Writing $Q(u)=Q_j(u)$ on $L_j$ gives
 
 ```math
-\lambda_j=(Q_j)_\#\nu_j,\qquad \Pi^Z=Q_\#\nu.
+\lambda_j=(Q_j)_\#\nu_j,\qquad \Pi=Q_\#\nu.
 ```
 
 Here $Q_\#\nu$ means the distribution of $Q(U)$ when $U\sim\nu$.
-$Q$ is a modelling choice, not an inverse of the hard map $T$, which sends a
-whole source cell to one centre. All valid choices preserve
+The hard map $T$ sends each whole source cell to one center. Choose $Q$ to
+specify a distribution within that cell. All maps satisfying the cell condition
+above preserve
 
 ```math
-\Pi^Z\left(\bigcup_{j\in J}V_j^\dagger\right)=\frac{|J|}{n+1}.
+\Pi\left(\bigcup_{j\in J}V_j^\dagger\right)=\frac{|J|}{n+1}.
 ```
 
 ### Example: uniform gaps in one dimension
 
-Suppose source points and predictions lie between 0 and 1. Choose a uniform law
-on each gap between sorted source points and those bounds. If
+Suppose the source points lie between 0 and 1, and choose [0, 1] as the support
+for future source-space values. Choose a uniform law on each gap between
+sorted source points and those bounds. If
 $L_j=[a_j,b_j]$ and the corresponding gap has endpoints $c_j,d_j$, use
 
 ```math
@@ -271,14 +293,30 @@ def uniform_gaps(points, labels):
 predictive = T1.predictive_distribution(map_from_reference=uniform_gaps)
 ```
 
-Here `fraction` runs from 0 to 1 within a reference cell.
+In one dimension the reference is uniform on [-1, 1], split into equal intervals.
+For zero-based label j and N = `len(widths)`, the cell endpoints are
+-1 + 2j/N and -1 + 2(j + 1)/N. Thus `fraction` rescales that interval to [0, 1].
 
-The bounds and uniform gap laws are choices, not defaults. Unbounded exterior
-gaps need a proper tail law; there is no uniform probability law on a half-line.
+Supply bounds and within-gap laws appropriate to your problem. For unbounded
+exterior gaps, choose proper tail distributions with total probability one.
+
+### Reference-cell distributions
+
+For quantities in reference coordinates, `T.reference_distribution(z)` returns
+the reference law within the candidate's assigned cell:
+
+```python
+cell = T.reference_distribution(z)
+cell.sample(1000, rng=0)  # reference points in L_{k(z)}
+```
+
+Under the calibration assumptions above, $W_z\sim\nu_{k(z)}$ gives
+$W_{Z_{n+1}}\sim\nu$ marginally. These draws lie in the reference ball;
+the map $Q$ defines the separate distribution in source coordinates.
 
 ## Sampling and expectations
 
-Sampling from $\Pi^Z$ has three steps:
+Sampling from $\Pi$ has three steps:
 
 ```math
 J\sim\mathrm{Uniform}\{1,\ldots,n+1\},\qquad
@@ -295,7 +333,7 @@ predictive.sample(size=1000, rng=0)  # predictive points, shape (1000, 1)
 For integrable $f$, predictive expectations reduce to integration on the reference:
 
 ```math
-\mathbb E_{\Pi^Z}[f(X)]
+\mathbb E_{\Pi}[f(X)]
 =\frac1{n+1}\sum_{j=1}^{n+1}\mathbb E_{\nu_j}[f(Q_j(U))]
 =\mathbb E_\nu[f\circ Q].
 ```
@@ -334,11 +372,11 @@ ordinary sampling gives random counts in each cell.
 
 ```python
 nu.mean()                  # zero vector, shape (2,)
-nu.covariance()            # variances and covariances, shape (2, 2)
+nu.cov()                   # variances and covariances, shape (2, 2)
 cell.mean()
-cell.covariance()
+cell.cov()
 predictive.mean()          # array([0.5])
-predictive.covariance()    # variance, shape (1, 1)
+predictive.cov()           # variance, shape (1, 1)
 ```
 
 For individual moments, give one nonnegative power per coordinate:
@@ -349,12 +387,13 @@ cell.moment(powers=(1, 1))      # E[U_1 U_2] within one reference cell
 predictive.moment(powers=(2,))  # E[X^2] in one dimension
 ```
 
-These are raw moments, not centred moments; `covariance()` subtracts the means.
+`moment` returns raw moments; `cov()` centers coordinates by their means.
 See `help(nu.moment)` for the definition and closed-form reference formula.
 
-Reference statistics use analytic formulas evaluated in floating point.
-Mapped statistics use fixed integration points; to estimate them randomly,
-use `expect` with `rng` and the corresponding function.
+Reference and reference-cell statistics use analytic formulas. Mapped
+statistics use fixed integration points, with `n_integration_points` setting
+their number per cell. To estimate them randomly, use `expect` with `rng` and
+the corresponding function.
 
 ## Density and entropy
 
@@ -384,12 +423,12 @@ The images lie in disjoint assigned source cells. The uniform mixture weight
 cancels the conditional-density factor, giving almost everywhere:
 
 ```math
-p_{\Pi^Z}(x)=p_\nu(q_j(x))|\det Dq_j(x)|,
+p_{\Pi}(x)=p_\nu(q_j(x))|\det Dq_j(x)|,
 \qquad x\in Q_j(L_j).
 ```
 
-Density is zero outside the union of the images. A map need not fill the whole
-source cell.
+Each map can cover a subset of its assigned source cell. Density is zero
+outside the union of the images.
 
 For the uniform-gap example, supply the inverse and its log absolute Jacobian
 determinant:
@@ -417,13 +456,13 @@ Write $h$ for differential entropy, measured in nats.
 For disjoint component distributions with densities,
 
 ```math
-h(\Pi^Z)=\log(n+1)+\frac1{n+1}\sum_{j=1}^{n+1}h(\lambda_j).
+h(\Pi)=\log(n+1)+\frac1{n+1}\sum_{j=1}^{n+1}h(\lambda_j).
 ```
 
 Under the change-of-variables assumptions above, when these terms are finite,
 
 ```math
-h(\Pi^Z)=h(\nu)+\frac1{n+1}\sum_{j=1}^{n+1}
+h(\Pi)=h(\nu)+\frac1{n+1}\sum_{j=1}^{n+1}
 \mathbb E_{\nu_j}[\log|\det DQ_j(U)|].
 ```
 
@@ -433,9 +472,8 @@ cell.entropy()
 predictive.entropy()
 ```
 
-The implementation evaluates mapped entropy as `expect(-logpdf)`. It therefore
-needs the inverse callbacks, even though the forward-Jacobian identity is another
-way to compute the same quantity.
+To evaluate a mapped law's entropy, supply the same inverse callbacks as for
+its density.
 
 ## Weighted distributions
 
@@ -443,10 +481,12 @@ way to compute the same quantity.
 other weights $w_j\geq0$ with $\sum_jw_j=1$:
 
 ```math
-\nu_w=\sum_jw_j\nu_j,\qquad
-\Pi_w^Z=\sum_jw_j(Q_j)_\#\nu_j.
+\nu^w=\sum_jw_j\nu_j,\qquad
+\Pi^w=\sum_jw_j(Q_j)_\#\nu_j.
 ```
 
+The superscript $w$ specifies the weights. With $w_j=1/(n+1)$, these laws
+reduce to $\nu$ and $\Pi$.
 Sampling chooses a cell using these weights before drawing within it.
 
 ```python
@@ -467,57 +507,85 @@ cells, pass `cells=[...]` and one weight per selected cell.
 For a cell-preserving map, the density and entropy become
 
 ```math
-p_{\Pi_w^Z}(x)=(n+1)w_jp_\nu(q_j(x))|\det Dq_j(x)|,
+p_{\Pi^w}(x)=(n+1)w_jp_\nu(q_j(x))|\det Dq_j(x)|,
 \qquad x\in Q_j(L_j),
 ```
 
 ```math
-h(\Pi_w^Z)=\sum_{j:w_j>0}w_j\left[
+h(\Pi^w)=\sum_{j:w_j>0}w_j\left[
 h(\nu_j)+\mathbb E_{\nu_j}[\log|\det DQ_j(U)|]-\log w_j
 \right].
 ```
 
-These formulas use the same regularity assumptions as above. Nonuniform weights
-change source-cell probabilities; they do not retain the equal-cell calibration
-of $\Pi^Z$.
+These formulas use the same regularity assumptions as above. For cell-preserving
+maps, source-cell probabilities equal $w_j$; the equal-cell calibration of $\Pi$
+corresponds to $w_j=1/(n+1)$.
 
 ## Smoothing and custom targets
 
-Smoothing blends target centres instead of choosing one. The smooth potential,
+Smoothing forms weighted averages of target centers. The smooth potential,
 map, Jacobian, and inverse have their definitions in the corresponding methods.
 `temperature` is $\tau>0$ in the units of the returned potential.
+
+With `T.smooth()`, the default adapts to the fitted assignment margins. For
+$a_j(v)=\langle v,m_j\rangle-\phi_j$ and its winning index $j_*(v)$, let
+
+```math
+\Delta(v)=a_{j_*(v)}(v)-\max_{j:\,\|m_j\|\ne\|m_{j_*(v)}\|}a_j(v),
+\qquad
+\tau=100\,\operatorname{median}\{\Delta(v):\Delta(v)>10^{-10}\}.
+```
+
+Probes resample the observations with 2% covariance-scaled Gaussian jitter,
+using $\max(4000,n)$ points and seed 0. Jitter is computed in normalized source
+coordinates, with a $10^{-9}I$ covariance ridge; the gap cutoff uses original
+potential units.
+The temperature is computed once per fit; if no gap qualifies, it falls back
+to 0.05 times the source RMS scale. This is a smoothing heuristic, not a
+coverage calibration. Pass `temperature=` to choose it directly:
 
 ```python
 smooth = T.smooth(temperature=0.4)
 mapped = smooth(z)
-smooth.inverse(mapped)
 smooth.potential(z)
 smooth.jacobian(z)
 smooth.map_jacobian(z)  # map and Jacobian together
 smooth.reference_distribution(z)  # Law with softmax weights
 ```
 
-The inverse $Q_\tau$ is defined strictly inside the target centres' convex hull, provided
-they affinely span $\mathbb R^d$. For a law $\eta$ supported there,
-`smooth.pullback(eta)` gives $(Q_\tau)_\#\eta$. The full default reference extends
-outside the hull, so it cannot be used directly. A smooth inverse is a valid
-equal-cell predictive completion only if the target law gives each cell equal
-mass and the inverse preserves its label.
+The reverse map blends all $n+1$ augmented sources $(Z_1,\ldots,Z_n,z)$,
+using their hard potential values $\Phi(Z_i)$ and $\Phi(z)$. The supplied
+candidate stays fixed while reference points vary. This dual-side map is
+defined on the full reference space; it is not the numerical inverse of
+the forward smooth map and need not preserve hard source-cell labels.
 
-The smooth density integrates to $\nu(K)$, not one, where $K$ is that convex
-hull. Density regions use this original mass without normalization:
+```python
+smooth.inverse(nu.centers, candidate=z)
+law = smooth.pullback(nu, candidate=z)
+law.sample(1000, rng=0)
+law.mean()
+law.cov()
+law.expect(squared_norm)
+
+cell_law = smooth.pullback(ot.Law(nu, cells=[0]), candidate=z)
+cell_law.mean()
+```
+
+These use $\Pi_\tau(\,\cdot\,;z)=Q_\tau(\,\cdot\,;z)_\#\nu$ and
+$\lambda_j(\,\cdot\,;z)=Q_\tau(\,\cdot\,;z)_\#\nu_j$.
+This candidate-based law provides sampling, expectations, and moments. For
+`pdf` and `entropy`, construct a law with the density callbacks described above.
+
+The separate forward-density readout belongs to the forward smooth map. It is
+unnormalized, with integral $\nu(K)$, where $K$ is the target centers' convex hull.
 
 ```python
 smooth.density(z)
-density_region = smooth.density_region(mass=0.8)
-density_region.contains(z)
-density_region.mass       # approximate included mass, not coverage
-density_region.threshold
+smooth.log_density(z)
 ```
 
-`Law` and `Reference` also provide `density_region`. All points tied at the
-cutoff are included. A requested mass above the smooth density's total is
-unattainable.
+`Law` and `Reference` provide `density_region`. All points tied at the
+cutoff are included.
 
 Custom target arrays have shape `(n + 1, d)`:
 
@@ -526,6 +594,7 @@ target = [[-0.75], [-0.25], [0.25], [0.75]]
 custom = ot.fit(source_1d[:, None], target=target)
 ```
 
-Their coordinates are retained as supplied. Arrays support assignment and
-smoothing; a `Reference` target also supplies reference-cell distributions and
+Their coordinates are retained as supplied. Arrays support assignment,
+smoothing, and the assigned target's radius and direction through `rank` and
+`sign`. A `Reference` target also supplies reference-cell distributions and
 quantile regions.

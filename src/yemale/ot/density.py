@@ -12,8 +12,9 @@ from yemale._array import count, readonly
 class DensityRegion:
     """Points whose density reaches a cutoff, including ties.
 
-    Build with ``density_region`` on a law or smooth map. ``mass`` estimates
-    the included density integral, not the coverage of future observations.
+    Create with ``law.density_region(mass)`` or ``reference.density_region(mass)``.
+    ``mass`` estimates the included density integral, not the coverage of future
+    observations.
 
     Attributes:
         mass: Estimated density integral over the region, including cutoff ties.
@@ -37,21 +38,16 @@ class DensityRegion:
         return self._log_density(points) >= self._log_threshold
 
 
-def _density_region(
-    owner, log_density, prepare, mass, n_integration_points, total_mass=1.0
-):
+def _density_region(owner, log_density, prepare, mass, n_integration_points):
+    """Select a cutoff from quadrature points and their mass under the density.
+
+    prepare(size) returns those points and mass weights; scores only order them.
+    Cached callbacks must remain unchanged.
+    """
     mass = float(mass)
     if not np.isfinite(mass) or not 0 < mass <= 1:
         raise ValueError("mass must be finite and in (0, 1]")
     size = count(n_integration_points, "n_integration_points")
-    if total_mass is not None and mass > total_mass:
-        raise ValueError(
-            f"requested mass {mass:g} exceeds this density's total mass, "
-            f"{total_mass:.12g}"
-        )
-    # The smooth density is positive throughout source space.
-    if total_mass is not None and mass == total_mass < 1:
-        return DensityRegion(log_density, -np.inf, total_mass)
     cached = getattr(owner, "_density_cache", None)
     if cached is None or cached[0] != size:
         points, weights = prepare(size)
@@ -62,6 +58,7 @@ def _density_region(
         scores = readonly(scores[order])
         cumulative = np.cumsum(weights[order])
         if len(cumulative):
+            # Match the quadrature total despite cumulative rounding.
             cumulative[-1] = weights.sum()
         cached = (size, scores, readonly(cumulative))
         object.__setattr__(owner, "_density_cache", cached)

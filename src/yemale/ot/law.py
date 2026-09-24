@@ -128,6 +128,8 @@ class Law:
 
     def _integration_points(self, n_integration_points, rng=None):
         n_integration_points = count(n_integration_points, "n_integration_points")
+        # A zero-mass cell need not lie in the forward map's domain.
+        # Remove it before generating and mapping integration points.
         active = self.weights > 0
         cells, weights = self.cells[active], self.weights[active]
         labels = np.repeat(cells, n_integration_points)
@@ -288,7 +290,7 @@ class Law:
         points, weights = self._integration_points(n_integration_points)
         return np.average(points, axis=0, weights=weights)
 
-    def covariance(self, *, n_integration_points=64):
+    def cov(self, *, n_integration_points=64):
         r"""Return the covariance matrix, with shape ``(dimension, dimension)``.
 
         .. math::
@@ -364,4 +366,10 @@ class Law:
                     jacobian = jacobian + previous
                 return target, jacobian
 
-        return Law(self.reference, self.cells, self.weights, mapped, inverse)
+        law = object.__new__(Law)
+        object.__setattr__(law, "reference", self.reference)
+        object.__setattr__(law, "cells", self.cells)
+        object.__setattr__(law, "weights", self.weights)
+        object.__setattr__(law, "_forward", mapped)
+        object.__setattr__(law, "_backward", inverse)
+        return law

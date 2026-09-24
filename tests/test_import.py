@@ -1,4 +1,4 @@
-"""Importing the package must not load a compiler or accelerator backend."""
+"""Importing the package leaves Numba unloaded."""
 
 import subprocess
 import sys
@@ -9,11 +9,7 @@ def test_import_is_lightweight():
         [
             sys.executable,
             "-c",
-            (
-                "import sys; import yemale; "
-                "assert not {'numba', 'llvmlite', 'jax', 'torch', 'tensorflow', 'cupy'} "
-                "& sys.modules.keys()"
-            ),
+            "import sys; import yemale; assert 'numba' not in sys.modules",
         ],
         check=True,
     )

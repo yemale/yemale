@@ -1,12 +1,11 @@
 """Exact candidate-augmented transport."""
 
-import math
 from dataclasses import dataclass
 from functools import cached_property
 
 import numpy as np
 
-from yemale._array import readonly, restore, rows, scalars
+from yemale._array import batch, readonly, restore, rows, scalars
 
 from .reference import Reference
 from .reference import reference as make_reference
@@ -16,7 +15,7 @@ from .reference import reference as make_reference
 class Transport:
     """Assign each candidate to a target after appending it to the fitted source.
 
-    Build with ``fit``. Each query is a separate ``n + 1`` assignment.
+    Create with ``ot.fit(source)``. Each query is a separate ``n + 1`` assignment.
     Queries use original source coordinates: ``(d,)`` or ``(..., d)``.
     Map and sign outputs keep the coordinate axis; label, rank and potential
     outputs do not. In one dimension, scalar and flat-vector queries also work.
@@ -25,6 +24,8 @@ class Transport:
         reference: Reference used to construct the targets, or None for array targets.
     """
 
+    # Internal queries use x = (z - source_center) / source_scale.
+    # Internal branches are <x, centered_target[j]> - affine_offsets[j].
     _target: np.ndarray
     _target_center: np.ndarray
     _centered_target: np.ndarray
@@ -33,7 +34,9 @@ class Transport:
     _source_scale: float
     _affine_offsets: np.ndarray
     _query_limit: float
+    # (target-to-row assignment, vacancy predecessors, auxiliary-row target)
     _assignment_tree: tuple[np.ndarray, np.ndarray, int]
+    # (sorted normalized sources, target labels in sorted-target order)
     _one_dimensional_lookup: tuple[np.ndarray, np.ndarray] | None
     _normalized_sources: np.ndarray
 
@@ -83,26 +86,13 @@ class Transport:
 
     @cached_property
     def _source_potential(self):
-        # Used to choose starting points for the smooth inverse.
-        source_cells = np.argsort(self._assignment_tree[0])[:-1]
+        """Hard potential values at the fitted sources in internal coordinates."""
+        target_to_row, _, _ = self._assignment_tree
+        source_cells = np.argsort(target_to_row)[:-1]  # Omit the auxiliary row.
         value = (self._normalized_sources * self._centered_target[source_cells]).sum(
             axis=1
         )
         return readonly(value - self._affine_offsets[source_cells])
-
-    @cached_property
-    def _inverse_domain(self):
-        centered = self._centered_target
-        scale = np.abs(centered).max()
-        dimension = self._target.shape[1]
-        if scale == 0 or np.linalg.matrix_rank(centered / scale) < dimension:
-            raise ValueError(
-                "smooth inverse requires targets that affinely span the space"
-            )
-        matrix = np.ones((dimension + 1, len(self._target) + 1))
-        matrix[:-1, :-1] = (centered / scale).T
-        matrix[:-1, -1] = 0
-        return readonly(matrix), self._target_center, scale
 
     def label(self, point):
         """Return the assigned target index, from 0 to n, for each candidate."""
@@ -188,6 +178,8 @@ class Transport:
         return self._scale_potential(points, value)
 
     def _scale_potential(self, points, value):
+        """Convert the centered-target potential at normalized points to source units."""
+        # Phi(z) = source_scale * (internal_phi(x) + <x, target_center>).
         with np.errstate(over="ignore", invalid="ignore"):
             value = self._source_scale * (value + points @ self._target_center)
         if not np.isfinite(value).all():
@@ -220,24 +212,52 @@ class Transport:
         )
         return matrix, matrix @ self._source_center + offset
 
-    def quantile_region(self, coverage):
-        r"""Return the smallest quantile region reaching the requested ``coverage``.
+    def region(self, reference_set):
+        r"""Return the source region mapped into a fixed target set B.
+
+        .. math:: \mathcal Q_T(B)=\{z:T(z)\in B\}.
+
+        ``reference_set`` takes target points ``(q, d)`` and returns one Boolean
+        per point. For the default 1-D reference, ``u = 2*p - 1`` converts
+        probability levels to reference coordinates: [0.05, 0.95] becomes
+        [-0.9, 0.9]. Use ``quantile_region(0.9)`` for central 90% coverage.
+        For a data-independent B, marginal coverage is the fraction of target
+        centres in B, not generally its continuous reference probability.
+        """
+        if not callable(reference_set):
+            raise TypeError(
+                "reference_set must return one Boolean per target point; "
+                "for a coverage level, use quantile_region(0.9)"
+            )
+        accepted = np.asarray(reference_set(self._target))
+        if accepted.shape != (len(self._target),) or accepted.dtype != bool:
+            raise ValueError(
+                f"reference_set must return {len(self._target)} Booleans; "
+                f"got shape {accepted.shape}, dtype {accepted.dtype}. "
+                "For one coordinate use points[:, 0]."
+            )
+        return Region(self, readonly(accepted, dtype=bool))
+
+    def quantile_region(self, coverage, *, randomized=True, rng=None):
+        r"""Return a quantile region with the requested marginal coverage.
 
         .. math::
 
-            \Omega_r=\{z:\|T(z)\|\leq r\},\qquad
-            J_r=\{j:\|m_j\|\leq r\}.
+            W_j\sim\nu(\,\cdot\mid L_j),\qquad
+            \Omega=\bigcup_{j:\|W_j\|\leq 1-\alpha}V_j^\dagger.
 
-        ``coverage`` is a probability in [0, 1], not the radius r. Choose the
-        smallest r >= 0 with :math:`|J_r|/(n+1)` at least this probability.
+        Args:
+            coverage: Probability in [0, 1], equal to 1 - alpha.
+            randomized: Draw once per reference cell, then keep membership fixed.
+                Defaults to True. False selects whole shells of target centres.
+            rng: Seed or NumPy Generator for reproducible randomization.
+
         Under exchangeability and almost-sure uniqueness of the augmented
-        assignment, the region covers the next
-        observation with probability ``region.coverage``, averaging over fitted
-        observations and the next candidate, not conditional on one fitted sample.
-
-        Equal-radius cells enter together, so achieved coverage can exceed the
-        request. Selecting every cell gives the whole space, even for a request
-        below 1. Requires the default reference-cell construction.
+        assignment, coverage averages over observations and randomization, not
+        one fitted sample. The selected-cell fraction can differ from the request.
+        With ``randomized=False``, return the smallest region {z: ||T(z)|| <= r}
+        reaching coverage; equal-radius cells enter together and can overshoot.
+        Requires reference cells. Return a QuantileRegion.
         """
         reference = self._require_reference()
         try:
@@ -248,17 +268,33 @@ class Transport:
             ) from None
         if not np.isfinite(coverage) or not 0.0 <= coverage <= 1.0:
             raise ValueError(f"coverage must be between 0 and 1; got {coverage!r}")
-        if coverage == 0.0:
+        if not isinstance(randomized, (bool, np.bool_)):
+            raise TypeError("randomized must be True or False")
+        if randomized:
+            radius = float(coverage)
+            lower, upper, _ = reference._partition
+            # Membership uses only radius, so no angular draw is needed.
+            # The 1-D partition uses signed intervals; abs gives the radius.
+            radii = np.abs(np.random.default_rng(rng).uniform(lower, upper))
+            accepted = radii <= radius
+            if radius == 0 or radius == 1:
+                accepted[:] = bool(radius)
+        elif rng is not None:
+            raise ValueError("rng requires randomized=True")
+        elif coverage == 0.0:
             radius = 0.0
+            accepted = np.zeros(reference.n + 1, dtype=bool)
         else:
-            position = math.ceil(coverage * (reference.n + 1)) - 1
+            cell_count = reference.n + 1
+            required = int(coverage * cell_count)
+            if required / cell_count < coverage:
+                required += 1
+            position = required - 1
             radius = float(np.partition(reference.ranks, position)[position])
-        tolerance = 16 * np.finfo(float).eps * max(1.0, abs(radius))
-        selected = np.flatnonzero(reference.ranks <= radius + tolerance)
-        if len(selected):
-            radius = float(reference.ranks[selected].max())
-        labels = readonly(selected, dtype=np.int64)
-        return QuantileRegion(self, radius, labels)
+            tolerance = 16 * np.finfo(float).eps * max(1.0, abs(radius))
+            accepted = reference.ranks <= radius + tolerance
+            radius = float(reference.ranks[accepted].max())
+        return QuantileRegion(self, readonly(accepted, dtype=bool), radius, randomized)
 
     def assignment(self, point) -> np.ndarray:
         """Return target indices for all source points followed by the candidate.
@@ -273,9 +309,9 @@ class Transport:
 
         if len(labels) != 1:
             return restore(lap.assignments(*self._assignment_tree, labels), shape)
-        inverse = lap.assign(*self._assignment_tree, int(labels[0]))
-        assignment = np.empty_like(inverse)
-        assignment[inverse] = np.arange(len(inverse))
+        target_to_row = lap.assign(*self._assignment_tree, int(labels[0]))
+        assignment = np.empty_like(target_to_row)
+        assignment[target_to_row] = np.arange(len(target_to_row))
         return restore(assignment[None], shape)
 
     def reference_distribution(self, point):
@@ -285,7 +321,7 @@ class Transport:
 
             K(z,\cdot)=\nu(\,\cdot\mid L_{k(z)}).
 
-        Samples are reference points, not predictions in source coordinates.
+        Samples and summaries use reference coordinates within that cell.
         Accept one candidate; return a Law. Requires a Reference target.
         """
         from .law import Law
@@ -309,11 +345,11 @@ class Transport:
 
         .. math::
 
-            \Pi^Z=\frac1{n+1}\sum_{j=1}^{n+1}
+            \Pi=\frac1{n+1}\sum_{j=1}^{n+1}
             (Q_j)_\#\nu(\,\cdot\mid L_j).
 
-        This is the law of Q_j(U) after drawing a cell uniformly and U within it.
-        Q_j chooses a distribution inside the cell; it is not an inverse of T.
+        Draw a cell uniformly, draw U within it, and return Q_j(U).
+        The supplied Q_j specifies how probability fills its source cell.
 
         Args:
             map_from_reference: Called as ``map_from_reference(points, labels)``
@@ -365,16 +401,57 @@ class Transport:
 
         return Law(reference, forward=map_from_reference, backward=backward)
 
+    @cached_property
+    def _default_temperature(self):
+        """Assignment-margin temperature in normalized source coordinates."""
+        sources = self._normalized_sources
+        n, dimension = sources.shape
+        radii = self._ranks
+        tolerance = 16 * np.finfo(float).eps * max(1.0, radii.max())
+        if np.ptp(radii) <= tolerance:
+            return 0.05
+
+        generator = np.random.default_rng(0)
+        size = max(4000, n)
+        probes = sources[generator.integers(0, n, size=size)]
+        if n > 1:
+            covariance = np.atleast_2d(np.cov(sources, rowvar=False))
+            covariance += 1e-9 * np.eye(dimension)
+            probes += 0.02 * generator.multivariate_normal(
+                np.zeros(dimension), covariance, size
+            )
+
+        gaps = np.empty(size)
+        # Bound query-target storage; only the scalar temperature is cached.
+        for start in range(0, size, 256):
+            logits = probes[start : start + 256] @ self._centered_target.T
+            logits -= self._affine_offsets
+            winners = logits.argmax(axis=1)
+            best = logits[np.arange(len(logits)), winners]
+            same_level = np.abs(radii[None, :] - radii[winners, None]) <= tolerance
+            logits[same_level] = -np.inf
+            gaps[start : start + len(logits)] = best - logits.max(axis=1)
+        gaps = gaps[np.isfinite(gaps) & (gaps > 1e-10 / self._source_scale)]
+        return 100 * float(np.median(gaps)) if len(gaps) else 0.05
+
     def smooth(self, temperature=None):
         """Return a SmoothMap that blends target centres instead of choosing one.
 
         ``temperature`` must be positive, in the units of ``potential``.
-        Larger values give a smoother map. ``None`` uses 0.05 times the source
-        scale described in ``fit``.
+        Larger values give a smoother map. ``None`` uses 100 times the median
+        winning margin over targets at a different radius, retaining margins
+        greater than 1e-10 in potential units. Probes resample the sources with
+        2% covariance-scaled Gaussian jitter (at least 4000 points, seed 0).
+        The choice is cached; if no margin qualifies, use 0.05 times the source
+        scale. An explicit temperature bypasses this calculation.
         """
         from .smoothing import SmoothMap
 
-        tau = 0.05 if temperature is None else float(temperature) / self._source_scale
+        tau = (
+            self._default_temperature
+            if temperature is None
+            else float(temperature) / self._source_scale
+        )
         if not np.isfinite(tau) or tau <= 0:
             raise ValueError("temperature must be positive and finite")
         return SmoothMap(self, tau)
@@ -387,6 +464,7 @@ class Transport:
         return self.reference
 
     def _query(self, point):
+        """Return normalized rows and the original batch shape."""
         points, shape = rows(point, self._target.shape[1])
         with np.errstate(over="ignore", invalid="ignore"):
             normalized = (points - self._source_center) / self._source_scale
@@ -413,12 +491,14 @@ class Transport:
                 normalized_points, self._centered_target, self._affine_offsets
             )
         sorted_source, target_order = self._one_dimensional_lookup
+        # In 1-D, sorted matching gives the candidate its insertion-position target.
         position = np.searchsorted(sorted_source, normalized_points[:, 0], side="left")
         labels = target_order[position]
         candidates = np.flatnonzero(position < len(sorted_source))
         tied = candidates[
             normalized_points[candidates, 0] == sorted_source[position[candidates]]
         ]
+        # Equal source values allow every insertion slot across the tied run.
         for row in tied:
             stop = np.searchsorted(
                 sorted_source, normalized_points[row, 0], side="right"
@@ -428,40 +508,80 @@ class Transport:
 
 
 @dataclass(frozen=True, eq=False, repr=False)
-class QuantileRegion:
-    """A finite-sample union of source cells selected by reference radius.
+class Region:
+    """Source points whose assigned targets belong to a chosen reference set.
 
-    Attributes:
-        radius: Reference-centre radius cutoff defining the region.
-        labels: Zero-based labels of the included reference cells.
+    Create with ``transport.region(reference_set)``.
     """
 
     _transport: Transport
-    radius: float
-    labels: np.ndarray
+    _accepted: np.ndarray
 
     def __repr__(self):
-        return (
-            f"QuantileRegion(coverage={self.coverage:.6g}, radius={self.radius:.6g}, "
-            f"cell_count={len(self.labels)})"
-        )
+        return f"Region(coverage={self.coverage:.6g}, cell_count={len(self.labels)})"
+
+    @cached_property
+    def labels(self):
+        """Zero-based labels of the included cells."""
+        return readonly(np.flatnonzero(self._accepted), dtype=np.int64)
 
     @property
     def coverage(self):
         """Fraction of reference cells included in the region.
 
-        Under the assumptions in ``quantile_region``, this is the next
-        observation's marginal coverage, not coverage conditional on the fit.
+        For a fixed reference set, this is marginal coverage under exchangeability
+        and almost-sure uniqueness of the augmented assignment.
         """
-        return len(self.labels) / len(self._transport._target)
+        return np.count_nonzero(self._accepted) / len(self._accepted)
 
     def contains(self, point):
         """Return whether each point belongs to the region."""
-        return self._transport.rank(point) <= self.radius
+        labels, shape = self._transport._labels(point)
+        return restore(self._accepted[labels], shape)
+
+    def select(self, points):
+        """Return accepted observations in input order, preserving their shape.
+
+        ``points`` has shape ``(q, d)``, or ``(q,)`` for scalar observations.
+        """
+        points = np.asarray(points)
+        return points[self.contains(batch(points, "points"))]
 
     def halfspaces(self):
         """Return ``(A, b)`` for every closed source cell in the region."""
         return tuple(self._transport.halfspaces(int(label)) for label in self.labels)
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class QuantileRegion(Region):
+    """Source cells selected by reference radius.
+
+    Create with ``transport.quantile_region(coverage)``.
+    Randomization is enabled by default.
+
+    Attributes:
+        radius: Reference-ball radius; applied to cell draws when randomized,
+            and to target centres otherwise.
+        randomized: Whether reference-cell draws selected the cells.
+    """
+
+    radius: float
+    randomized: bool
+
+    @property
+    def coverage(self):
+        """Marginal coverage, averaging over data and any region randomization.
+
+        For a randomized region, the realized fraction ``len(labels) / (n + 1)``
+        can differ from this probability.
+        """
+        return self.radius if self.randomized else super().coverage
+
+    def __repr__(self):
+        return (
+            f"QuantileRegion(coverage={self.coverage:.6g}, radius={self.radius:.6g}, "
+            f"cell_count={len(self.labels)}, randomized={self.randomized})"
+        )
 
 
 def fit(source, *, target=None) -> Transport:
@@ -478,8 +598,10 @@ def fit(source, *, target=None) -> Transport:
     A query uses original source coordinates and does not solve a new assignment.
 
     Args:
-        source: Finite observations of shape ``(n, d)``. Use ``(n, 1)`` for scalar data.
+        source: Finite observations of shape ``(n, d)`` or ``(n,)`` for scalar data.
+            A dataset containing one vector has shape ``(1, d)``.
         target: Matching Reference or finite target array of shape ``(n + 1, d)``.
+            Scalar targets may use ``(n + 1,)``.
             Defaults to ``reference(n, d)``. Target coordinates are used as supplied;
             they need not match the source's centre or scale. Array targets support
             assignment and smoothing, but do not provide reference-cell laws.
@@ -495,12 +617,7 @@ def fit(source, *, target=None) -> Transport:
         scalar rescaling, up to floating-point precision. Returned targets retain
         the supplied values.
     """
-    source = np.ascontiguousarray(source, dtype=np.float64)
-    if source.ndim != 2:
-        raise ValueError(
-            f"source must be 2-D of shape (n, d); got {source.shape}. "
-            "for 1-D data pass np.asarray(source)[:, None]"
-        )
+    source = np.ascontiguousarray(batch(source, "source"), dtype=np.float64)
     n, dimension = source.shape
     if n == 0:
         raise ValueError("source must contain at least one point")
@@ -519,7 +636,7 @@ def fit(source, *, target=None) -> Transport:
         target = reference.centers
     else:
         reference = None
-        target = readonly(target)
+        target = readonly(batch(target, "target"))
         expected_target_shape = (n + 1, dimension)
         if target.shape != expected_target_shape:
             raise ValueError(
@@ -532,13 +649,11 @@ def fit(source, *, target=None) -> Transport:
         source_center = source.mean(axis=0)
         normalized_source = source - source_center
         magnitude = np.abs(normalized_source).max()
-        source_scale = (
-            float(
-                magnitude * (np.linalg.norm(normalized_source / magnitude) / np.sqrt(n))
-            )
-            if magnitude
-            else 1.0
-        )
+        source_scale = 1.0
+        if magnitude:
+            # Compute RMS distance without overflowing squared coordinates.
+            scaled_rms = np.linalg.norm(normalized_source / magnitude) / np.sqrt(n)
+            source_scale = float(magnitude * scaled_rms)
     if not np.isfinite(source_scale) or source_scale <= 0:
         raise ValueError("source cannot be centered and scaled to finite coordinates")
     normalized_source /= source_scale
@@ -560,9 +675,12 @@ def fit(source, *, target=None) -> Transport:
         leave_one_costs, base_assignment, predecessor, free_target, lookup = (
             lap.solve_1d(normalized_source[:, 0], assignment_target[:, 0])
         )
+        # Repeated targets can tie across insertion slots; use affine label lookup.
         if np.any(np.diff(target[lookup[1], 0]) == 0):
             lookup = None
     else:
+        # Use -<x, m>; full assignments differ from squared cost by constants.
+        # Write directly into the real-source rows; the final row is auxiliary.
         cost = np.empty((n + 1, n + 1))
         np.matmul(normalized_source, assignment_target.T, out=cost[:n])
         cost[:n] *= -1.0
@@ -573,18 +691,20 @@ def fit(source, *, target=None) -> Transport:
         # by their largest absolute coordinate. This scale choice preserves the seed
         # under target rescaling; 0.5 comes from expanding squared distances.
         # Only initialization uses this bias, not the assignment objective.
-        row_bias += (
+        seed_bias = row_bias  # Reuse its storage; row minima are no longer needed.
+        seed_bias += (
             0.5
             * np.abs(assignment_target).max()
             * np.sum(normalized_source * normalized_source, axis=1)
         )
         leave_one_costs, base_assignment, predecessor, free_target = lap.solve(
-            cost, row_bias
+            cost, seed_bias
         )
         lookup = None
 
-    # Cross-term costs cancel the target-norm term in the potential. Row reduction
-    # shifts all leave-one costs equally; centering fixes the additive constant.
+    # For costs -<x, m>, let q_j be the leave-one cost.
+    # Squared-distance leave-one costs are K - ||m_j||² + 2*q_j.
+    # Thus affine offsets equal q_j up to a constant, including row reduction.
     with np.errstate(over="ignore", invalid="ignore"):
         affine_offsets = leave_one_costs - leave_one_costs.mean()
     if not np.isfinite(affine_offsets).all():

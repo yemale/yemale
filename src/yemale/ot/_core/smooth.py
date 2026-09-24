@@ -1,15 +1,17 @@
-"""Softmax averages, derivatives, and inverse maps computed with Newton's method."""
+"""Softmax averages, potentials, and derivatives."""
 
 import numpy as np
-from numba import get_num_threads, njit, prange
+from numba import njit, prange
 
 
 @njit(cache=True, boundscheck=False)
 def _row_weights(point, sites, offsets, tau, weights):
+    """Fill softmax weights and return the log-sum-exp potential."""
     for j in range(len(sites)):
         weights[j] = -offsets[j]
         for k in range(sites.shape[1]):
             weights[j] += point[k] * sites[j, k]
+    # Subtract the maximum before scaling so exponential arguments stay nonpositive.
     top = weights.max()
     total = 0.0
     for j in range(len(sites)):
@@ -50,6 +52,7 @@ def _read_parallel(points, sites, offsets, tau, output):
 
 
 def read(points, sites, offsets, tau):
+    # Dispatch thresholds here and below keep small batches out of parallel kernels.
     result = np.empty((len(points), sites.shape[1]))
     kernel = _read_parallel if len(points) >= 512 else _read
     kernel(points, sites, offsets, tau, result)
@@ -82,6 +85,7 @@ def potential(points, sites, offsets, tau):
 
 @njit(cache=True, boundscheck=False)
 def _row_statistics(point, sites, offsets, tau, weight, mapped, jacobian):
+    """Fill the potential's gradient and Hessian; return its value."""
     value = _row_weights(point, sites, offsets, tau, weight)
     dimension = sites.shape[1]
     for r in range(dimension):
@@ -128,87 +132,3 @@ def map_jacobian(points, sites, offsets, tau):
     parallel = len(points) >= 512 and work >= 65536
     kernel = _map_jacobian_parallel if parallel else _map_jacobian
     return kernel(points, sites, offsets, tau)
-
-
-@njit(cache=True, boundscheck=False)
-def _inverse_one(target, start, sites, offsets, tau, tolerance, max_iterations, output):
-    dimension = len(target)
-    point = start.copy()
-    mapped = np.empty(dimension)
-    jacobian = np.empty((dimension, dimension))
-    weight = np.empty(len(sites))
-    for _ in range(max_iterations):
-        value = _row_statistics(point, sites, offsets, tau, weight, mapped, jacobian)
-        gradient = mapped - target
-        residual = np.linalg.norm(gradient)
-        if residual <= tolerance or not np.isfinite(residual):
-            break
-        if not np.isfinite(jacobian).all():
-            output[:] = point
-            return np.inf
-        # Add to the diagonal to keep the Newton step solvable near zero derivatives.
-        ridge = 1e-12 * max(jacobian.max(), 1.0)
-        for k in range(dimension):
-            jacobian[k, k] += ridge
-        direction = np.linalg.solve(jacobian, gradient)
-        decrement = np.dot(gradient, direction)
-        objective = value - np.dot(target, point)
-        step, accepted = 1.0, False
-        for _ in range(60):
-            trial = point - step * direction
-            trial_value = _row_weights(trial, sites, offsets, tau, weight)
-            if trial_value - np.dot(target, trial) <= (
-                objective - 1e-4 * step * decrement + 1e-14 * (1.0 + abs(objective))
-            ):
-                point = trial
-                accepted = True
-                break
-            step *= 0.5
-        if not accepted:
-            break
-    _row_statistics(point, sites, offsets, tau, weight, mapped, jacobian)
-    output[:] = point
-    return np.linalg.norm(mapped - target)
-
-
-@njit(cache=True, boundscheck=False)
-def _inverse(targets, starts, sites, offsets, tau, tolerance, max_iterations):
-    result = np.empty_like(targets)
-    residual = np.empty(len(targets))
-    for i in range(len(targets)):
-        residual[i] = _inverse_one(
-            targets[i],
-            starts[i],
-            sites,
-            offsets,
-            tau,
-            tolerance,
-            max_iterations,
-            result[i],
-        )
-    return result, residual
-
-
-@njit(cache=True, boundscheck=False, parallel=True)
-def _inverse_parallel(targets, starts, sites, offsets, tau, tolerance, max_iterations):
-    result = np.empty_like(targets)
-    residual = np.empty(len(targets))
-    for i in prange(len(targets)):
-        residual[i] = _inverse_one(
-            targets[i],
-            starts[i],
-            sites,
-            offsets,
-            tau,
-            tolerance,
-            max_iterations,
-            result[i],
-        )
-    return result, residual
-
-
-def inverse(targets, starts, sites, offsets, tau, tolerance=1e-9, max_iterations=100):
-    work = len(targets) * sites.shape[0] * sites.shape[1]
-    parallel = get_num_threads() > 1 and len(targets) > 1 and work >= 4096
-    kernel = _inverse_parallel if parallel else _inverse
-    return kernel(targets, starts, sites, offsets, tau, tolerance, max_iterations)

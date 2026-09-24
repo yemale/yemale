@@ -17,6 +17,7 @@ def _row_max(point, sites, offsets):
         value = -offsets[j]
         for k in range(sites.shape[1]):
             value += point[k] * sites[j, k]
+        # Strict improvement keeps the first label when computed scores are equal.
         if value > best:
             label, best = j, value
     return label

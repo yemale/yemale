@@ -1,4 +1,9 @@
-"""Find assignment costs for each candidate target using Jonker-Volgenant."""
+"""Assignment and all-leave-one costs for n sources and n+1 targets.
+
+The final, zero-cost row is an auxiliary row, not a query candidate.
+r2c/c2r are row-to-column/column-to-row assignments; u/v are dual potentials.
+The target matched to the auxiliary row is vacant for the real sources.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ def _lapjv(cost, row_bias=None):
     r2c = np.full(n + 1, -1, dtype=np.int64)
     c2r = np.full(n + 1, -1, dtype=np.int64)
 
+    # Seed each target from its cheapest biased real-source row.
     for j in range(n + 1):
         best_val = np.inf
         best_i = -1
@@ -32,6 +38,7 @@ def _lapjv(cost, row_bias=None):
             r2c[best_i] = j
             c2r[j] = best_i
 
+    # Transfer each matched row's reduction to its assigned target.
     for i in range(n + 1):
         if r2c[i] == -1:
             continue
@@ -49,6 +56,7 @@ def _lapjv(cost, row_bias=None):
     pred = np.empty(n + 1, dtype=np.int64)
     scanned = np.empty(n + 1, dtype=np.bool_)
 
+    # Augment from each unmatched row along a shortest reduced-cost path.
     for free_i in range(n + 1):
         if r2c[free_i] != -1:
             continue
@@ -83,6 +91,7 @@ def _lapjv(cost, row_bias=None):
                         dist[j] = nd
                         pred[j] = i_m
 
+        # Update duals along scanned vertices, preserving matched-edge tightness.
         u[free_i] += h
         for j in range(n + 1):
             if scanned[j] and j != sink:
@@ -92,6 +101,7 @@ def _lapjv(cost, row_bias=None):
                 if i_row >= 0:
                     u[i_row] -= delta
 
+        # Flip assignments along the predecessor path back to the free row.
         j = sink
         while True:
             i = pred[j]
@@ -110,6 +120,11 @@ def _lapjv(cost, row_bias=None):
 
 @njit(cache=True, boundscheck=False)
 def _loo_costs(cost, c2r, u, v, free_target, base):
+    """Recover all leave-one costs by shortest paths between target vacancies.
+
+    An edge current -> target moves target's matched source into current.
+    Its weight is the reduced cost; pred records the reassignment path.
+    """
     n = cost.shape[0] - 1
     dist = np.full(n + 1, np.inf, dtype=np.float64)
     done = np.zeros(n + 1, dtype=np.bool_)
@@ -127,8 +142,10 @@ def _loo_costs(cost, c2r, u, v, free_target, base):
         for target in range(n + 1):
             if done[target]:
                 continue
+            # Fill the current vacancy with target's matched source.
             source = c2r[target]
             reduced = cost[source, current] - u[source] - v[current]
+            # Reduced costs are nonnegative in exact arithmetic.
             if reduced < 0.0:
                 reduced = 0.0
             candidate = best + reduced
@@ -137,6 +154,7 @@ def _loo_costs(cost, c2r, u, v, free_target, base):
                 pred[target] = current
 
     leave_one = np.empty(n + 1, dtype=np.float64)
+    # Restore the endpoint dual difference to obtain actual assignment costs.
     for target in range(n + 1):
         leave_one[target] = base + dist[target] + v[free_target] - v[target]
     return leave_one, pred
@@ -147,6 +165,7 @@ def assign(base, predecessor, free_target, reserved):
     """Return target-to-row indices, assigning the candidate row to ``reserved``."""
     result = base.copy()
     target = reserved
+    # Move the vacancy along its stored path, then reserve it for the candidate.
     while target != free_target:
         previous = predecessor[target]
         result[previous] = base[target]
@@ -157,6 +176,7 @@ def assign(base, predecessor, free_target, reserved):
 
 @njit(cache=True, boundscheck=False)
 def _assignments(base, predecessor, free_target, labels, result):
+    """Fill one row-to-target assignment per candidate label."""
     for row in range(len(labels)):
         inverse = assign(base, predecessor, free_target, labels[row])
         for target in range(len(base)):
@@ -173,6 +193,7 @@ def _assignments_parallel(base, predecessor, free_target, labels, result):
 
 def assignments(base, predecessor, free_target, labels):
     result = np.empty((len(labels), len(base)), dtype=np.int64)
+    # Performance crossover: enough candidates and assignment entries for threads.
     parallel = len(labels) >= 512 and result.size >= 65536
     kernel = _assignments_parallel if parallel else _assignments
     kernel(base, predecessor, free_target, labels, result)
@@ -187,6 +208,7 @@ def solve_1d(source: np.ndarray, target: np.ndarray):
     u = target[target_order]
     n = len(source)
 
+    # Omitting target j keeps matches before j and shifts later matches by one.
     left = -x * u[:-1]
     right = -x * u[1:]
     prefix = np.concatenate(([0.0], np.cumsum(left)))
@@ -195,12 +217,14 @@ def solve_1d(source: np.ndarray, target: np.ndarray):
 
     leave_one = np.empty(n + 1)
     leave_one[target_order] = sorted_cost
+    # Any minimizing vacancy works; choose the last in sorted order as the base.
     free_position = int(np.flatnonzero(sorted_cost == sorted_cost.min())[-1])
     free_target = int(target_order[free_position])
 
     inverse = np.empty(n + 1, dtype=np.int64)
     inverse[target_order] = np.insert(source_order, free_position, n)
 
+    # Move vacancies toward the base through adjacent targets in sorted order.
     sorted_pred = np.full(n + 1, -1, dtype=np.int64)
     sorted_pred[:free_position] = target_order[1 : free_position + 1]
     sorted_pred[free_position + 1 :] = target_order[free_position:-1]
