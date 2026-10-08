@@ -25,9 +25,13 @@ html_theme = "sphinx_book_theme"
 html_title = "yemale"
 html_context = {"default_mode": "auto"}
 html_theme_options = {
+    "repository_url": "https://github.com/yemale/yemale",
+    "use_repository_button": True,
+    "navbar_persistent": [],
     "show_toc_level": 2,
     "footer_content_items": [],
     "use_download_button": False,
+    "use_fullscreen_button": False,
 }
 html_static_path = ["_static"]
 html_css_files = ["yemale.css"]

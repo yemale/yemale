@@ -17,7 +17,7 @@ independently.
 ## Install
 
 ```bash
-python -m pip install yemale==0.1.0a2
+pip install yemale
 ```
 
 Alpha release.
