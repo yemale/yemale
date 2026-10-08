@@ -1,7 +1,8 @@
 # Conformal prediction
 
-Add uncertainty regions around your predictor's outputs. Start with a fitted
-model or with prediction arrays and their observed outcomes.
+Build prediction regions with scalar or vector-valued scores, and choose a
+predictive law for sampling and summaries. Start with a fitted model or with
+prediction arrays and their observed outcomes.
 
 ## Use your model
 

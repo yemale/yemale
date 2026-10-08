@@ -91,9 +91,10 @@ mapped score law, its density also requires the inverse of its reference-to-scor
 map and that inverse's log-Jacobian, as in the
 [guide](usage.md#predictive-density). Entropy has the same requirements.
 
-Use one prediction, or `cpd[i]`, for density and `density_region(mass=0.9)`.
+Use one prediction, or `cpd[i]`, for `pdf`, `logpdf` and `density_region(mass=0.9)`.
 The latter selects probability mass under the supplied law;
 `cpd.region(0.9)` targets marginal coverage of future outcomes.
+The forward readouts `density` and `log_density` also accept paired batches.
 
 ## Potential and gradient
 

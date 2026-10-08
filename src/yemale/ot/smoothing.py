@@ -191,12 +191,9 @@ class SmoothMap:
             raise ValueError(
                 f"candidate must be one source point; got {len(point)} points"
             )
-        potential = transport._potential_from_labels(point, transport._maximize(point))
+        potential = transport._internal_potential(point, transport._maximize(point))
         sites = np.concatenate((transport._normalized_sources, point))
-        offsets = np.r_[
-            transport._source_potential,
-            potential / transport._source_scale - point @ transport._target_center,
-        ]
+        offsets = np.r_[transport._source_potential, potential]
 
         def inverse(target):
             targets, shape = rows(target, sites.shape[1], "target")

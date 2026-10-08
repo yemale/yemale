@@ -4,6 +4,9 @@ The transport assigns candidates to reference cells. A predictive distribution
 also specifies how probability fills the corresponding cells in source space.
 This guide connects the construction and formulas to the API.
 
+For the candidate-augmented transport and conformal construction, see
+[Beyond Uncertainty Sets](https://arxiv.org/abs/2511.15146).
+
 - [Reference distribution](#reference-distribution)
 - [Candidate-augmented transport](#candidate-augmented-transport)
 - [Quantile regions, depth, and median](#quantile-regions)

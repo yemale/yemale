@@ -173,9 +173,14 @@ class Transport:
         return restore(self._potential_from_labels(normalized, labels), shape)
 
     def _potential_from_labels(self, points, labels):
+        value = self._internal_potential(points, labels)
+        return self._scale_potential(points, value)
+
+    def _internal_potential(self, points, labels):
+        """Evaluate selected affine pieces in normalized, centered coordinates."""
         value = (points * self._centered_target[labels]).sum(axis=1)
         value -= self._affine_offsets[labels]
-        return self._scale_potential(points, value)
+        return value
 
     def _scale_potential(self, points, value):
         """Convert the centered-target potential at normalized points to source units."""

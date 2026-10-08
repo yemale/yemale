@@ -147,3 +147,13 @@ def test_augmented_inverse_uses_all_source_anchors():
     expected = softmax(logits, axis=-1) @ anchors
     actual = transport.smooth(0.4).inverse(targets, candidate=candidate)
     np.testing.assert_allclose(actual, expected, atol=1e-12)
+
+
+def test_augmented_inverse_preserves_target_translation():
+    target = np.array([-1.0, 0.0, 1.0])
+    base = ot.fit([-1.0, 1.0], target=target).smooth(0.4)
+    shifted = ot.fit([-1.0, 1.0], target=target + 1e15).smooth(0.4)
+    np.testing.assert_allclose(
+        shifted.inverse(1e15, candidate=0.3), base.inverse(0.0, candidate=0.3),
+        rtol=1e-12,
+    )

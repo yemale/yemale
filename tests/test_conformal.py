@@ -155,9 +155,14 @@ def test_regions_select_original_labels():
         cp.predict(0).region(0.9, reference_set=reference_set)
 
 
-def test_predictive_law_applies_inverse_score():
+@pytest.mark.parametrize("flat_scores", [False, True])
+def test_predictive_law_applies_inverse_score(flat_scores):
+    def forward(prediction, y):
+        scores = (y - prediction) / 2
+        return scores[:, 0] if flat_scores else scores
+
     score = ScoreMap(
-        forward=lambda prediction, y: (y - prediction) / 2,
+        forward=forward,
         inverse=lambda prediction, z: prediction + 2 * z,
         jacobian=lambda prediction, y: np.eye(1) / 2,
     )
@@ -196,6 +201,20 @@ def test_predictive_law_applies_inverse_score():
     forward_only = yemale.conformalize([0.0], [0.0], score=score.forward)
     with pytest.raises(TypeError):
         forward_only.predict(0, law=law).mean()
+
+
+def test_score_jacobian_shape_is_shared_by_gradient_and_densities():
+    score = ScoreMap(
+        forward=lambda p, y: y - p,
+        inverse=lambda p, z: p + z,
+        jacobian=lambda p, y: 2 * np.eye(2),
+    )
+    cpd = yemale.conformalize([0.0], [0.0], score=score).predict(
+        0.0, law=ot.Law(ot.reference(1, 1))
+    )
+    for readout in (cpd.potential_gradient, cpd.density, cpd.pdf):
+        with pytest.raises(ValueError, match="score Jacobian must have shape"):
+            readout([-0.25, 0.25])
 
 
 def test_candidate_law_composes_nonlinear_score():

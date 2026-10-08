@@ -18,7 +18,8 @@ class ScoreMap:
     the prediction, outcome, and score widths, and q for the number of outcomes.
 
     Args:
-        forward: ``forward(predictions, outcomes)`` returns scores ``(q, s)``.
+        forward: ``forward(predictions, outcomes)`` returns scores ``(q, s)``
+            or ``(q,)`` for scalar scores.
             Outcomes have shape ``(q, d)``; predictions have shape ``(q, p)``
             or ``(1, p)`` when one prediction accompanies many outcomes.
         inverse: Optional ``inverse(predictions, scores)`` returning outcomes
@@ -231,6 +232,18 @@ class CPD:
             raise ValueError("score must return one score per outcome")
         return scores
 
+    def _score_jacobian(self, outcomes):
+        jacobian = np.asarray(
+            self._cp.score.jacobian(np.atleast_2d(self._prediction), outcomes)
+        )
+        shape = (self.transport._target.shape[1], outcomes.shape[1])
+        if jacobian.shape not in (shape, (len(outcomes), *shape)):
+            raise ValueError(
+                f"score Jacobian must have shape {shape} or "
+                f"{(len(outcomes), *shape)}; got {jacobian.shape}"
+            )
+        return jacobian
+
     def transform(self, outcomes):
         r"""Map outcomes to reference coordinates, one vector per outcome.
 
@@ -277,13 +290,7 @@ class CPD:
             _points(outcomes, self._cp._outcome_dimension, "outcomes")
         )
         transformed = self.transform(outcomes)
-        jacobian = np.asarray(score.jacobian(np.atleast_2d(self._prediction), outcomes))
-        shape = (transformed.shape[1], outcomes.shape[1])
-        if jacobian.shape not in (shape, (len(outcomes), *shape)):
-            raise ValueError(
-                f"score Jacobian must have shape {shape} or "
-                f"{(len(outcomes), *shape)}; got {jacobian.shape}"
-            )
+        jacobian = self._score_jacobian(outcomes)
         return np.einsum("...ij,...i->...j", jacobian, transformed)
 
     def region(self, coverage=None, *, reference_set=None, randomized=True, rng=None):
@@ -336,9 +343,7 @@ class CPD:
         scores = self._scores(outcomes)
         if scores.shape[1] != outcomes.shape[1]:
             raise ValueError("density requires equal score and outcome dimensions")
-        logdet = np.linalg.slogdet(
-            score.jacobian(np.atleast_2d(self._prediction), outcomes)
-        )[1]
+        logdet = np.linalg.slogdet(self._score_jacobian(outcomes))[1]
         return self.transport.smooth(temperature).log_density(scores) + logdet
 
     def density(self, outcomes, *, temperature=None):
@@ -374,8 +379,8 @@ class CPD:
 
             def backward(outcomes):
                 return (
-                    score.forward(prediction, outcomes),
-                    np.linalg.slogdet(score.jacobian(prediction, outcomes))[1],
+                    self._scores(outcomes),
+                    np.linalg.slogdet(self._score_jacobian(outcomes))[1],
                 )
 
         return self._score_law._map(
