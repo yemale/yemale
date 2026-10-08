@@ -1,25 +1,26 @@
 # yemale
 
-Prediction regions and predictive distributions for your model.
+**Build prediction regions. Generate possible outcomes. Evaluate their consequences.**
 
-yemale adds uncertainty estimates to a fitted model without changing its
-predictions. It handles one output or several outputs together, such as a
-location's two coordinates. Choose a distribution to generate possible outcomes
-and compute means and covariances.
+yemale builds multivariate conformal predictive distributions from predictions
+and observed outcomes. Use them to construct prediction regions, draw samples,
+assign probabilities to events, and compute expectations—for example, the
+expected cost of a decision.
 
-Under the hood, it uses multivariate conformal prediction and optimal transport,
-with scalar or vector-valued scores. The transport engine also works on its own.
+The conformal construction provides finite-sample calibration without assuming
+a particular data distribution.
+
+It uses optimal transport to handle scalar and vector-valued scores, without
+first reducing vectors to a scalar summary. The transport engine also works
+independently.
 
 ## Install
 
-Requires Python 3.10 or later.
-
 ```bash
-python -m pip install yemale==0.1.0a1
+python -m pip install yemale==0.1.0a2
 ```
 
-The API may change before 1.0; see the
-[changelog](https://github.com/yemale/yemale/blob/main/CHANGELOG.md).
+Alpha release.
 
 ## With your model
 
@@ -38,20 +39,12 @@ region.contains(y_new)  # One Boolean per new outcome.
 ```
 
 `model.predict(X_new)` still returns the original point predictions.
-By default, yemale uses the prediction errors, `outcomes - predictions`.
-Pass arrays of shape `(n,)` for one output or `(n, d)` for several outputs.
-Regions use randomization; `rng=0` makes the example reproducible. The requested
-coverage holds on average under the
-[documented assumptions](https://yemale.github.io/conformal.html#coverage).
 
-Already have predictions? Use `yemale.conformalize(predictions, outcomes)`
-directly; `extend` only connects this operation to your model.
+Already have predictions? Use `yemale.conformalize(predictions, outcomes)`.
 
 ## Sampling and summaries
 
-To generate possible outcomes, first choose a distribution. This example uses
-`candidate=` to construct one for a single new input. The candidate is the
-model's prediction and stays fixed while we draw samples:
+Use the model's prediction as the fixed candidate for sampling:
 
 ```python
 candidate = model.predict(X_new[:1])[0]
@@ -61,10 +54,6 @@ cpd.mean()
 cpd.cov()
 ```
 
-You can also [choose your own distribution](https://yemale.github.io/conformal.html#predictive-laws)
-with `law=`. The coverage guarantee for regions does not automatically apply
-to the distribution used for sampling.
-
 ## Explore
 
 - [Conformal prediction](https://yemale.github.io/conformal.html): use a model or prediction
@@ -72,6 +61,7 @@ to the distribution used for sampling.
 - [Optimal transport](https://yemale.github.io/ot.html): fit point clouds, construct regions,
   and work with reference and predictive distributions.
 - [Mathematical guide](https://yemale.github.io/usage.html): the construction and its connection to the API.
+- [Changelog](https://github.com/yemale/yemale/blob/main/CHANGELOG.md).
 
 ## License
 

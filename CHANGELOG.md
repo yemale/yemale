@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0a2
+
+- Clarify the package overview and simplify the getting-started examples.
+- No API or numerical changes.
+
 ## 0.1.0a1
 
 - Exact candidate-augmented transport with ranks, signs, assignments, and regions.
