@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0a1 (unreleased)
+## 0.1.0a1
 
 - Exact candidate-augmented transport with ranks, signs, assignments, and regions.
 - Dempster–Hill reference laws, sampling, expectations, and moments.

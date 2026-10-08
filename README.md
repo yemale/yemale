@@ -12,11 +12,10 @@ with scalar or vector-valued scores. The transport engine also works on its own.
 
 ## Install
 
-Requires Python 3.10–3.14. The first PyPI alpha, `0.1.0a1`, is being prepared.
-Until it is published, install from GitHub:
+Requires Python 3.10 or later.
 
 ```bash
-python -m pip install "git+https://github.com/yemale/yemale.git"
+python -m pip install yemale==0.1.0a1
 ```
 
 The API may change before 1.0; see the
